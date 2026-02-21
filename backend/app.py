@@ -3,12 +3,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, text
 import uuid
 from fastapi.openapi.utils import get_openapi
 from jose import jwt, JWTError
 from datetime import datetime, timezone
-from dotenv import load_dotenv
+import logging
+from dotenv import load_dotenv, find_dotenv
 from pydantic import BaseModel
 from typing import Optional
 import os
@@ -19,8 +20,32 @@ from PIL import Image, ImageDraw, ImageFont
 import io
 
 # Load environment variables
-env_path = Path(__file__).parent / '.env'
-load_dotenv(dotenv_path=env_path)
+env_path = Path(__file__).parent / ".env"
+env_candidates = [env_path]
+found_env = find_dotenv(".env", usecwd=True)
+if found_env:
+    env_candidates.append(Path(found_env))
+
+_loaded_env_paths: list[str] = []
+for candidate in env_candidates:
+    if candidate and Path(candidate).exists():
+        load_dotenv(dotenv_path=candidate, override=True)
+        _loaded_env_paths.append(str(candidate))
+
+logger = logging.getLogger("backend")
+
+
+def _require_env_var(name: str) -> str:
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    return value
+
+
+# Fail fast if Microsoft OAuth is not configured
+_require_env_var("MICROSOFT_CLIENT_ID")
+_require_env_var("MICROSOFT_TENANT_ID")
+
 
 # Create avatars directory if it doesn't exist
 AVATARS_DIR = Path(__file__).parent / "avatars"
@@ -50,8 +75,8 @@ from rate_limit import check_rate_limit_ip, check_rate_limit_token
 from auth import hash_password, verify_password, create_access_token, create_refresh_token, SECRET_KEY, ALGORITHM
 from dependencies import get_current_user, admin_required
 from models import Log, User, Device, Telemetry
-# GOOGLE OAUTH DISABLED - Using manual login/register only
-# from google_oauth import verify_google_token, get_or_create_google_user
+from google_oauth import verify_google_token, get_or_create_google_user
+from microsoft_oauth import verify_microsoft_token, get_or_create_microsoft_user
 
 
 # Custom JSON encoder to handle timezone-aware datetimes
@@ -84,6 +109,23 @@ app = FastAPI(
     description="Zero Trust Monitoring System Backend",
     default_response_class=CustomJSONResponse
 )
+
+
+@app.on_event("startup")
+def _startup_env_check() -> None:
+    client_id = os.getenv("MICROSOFT_CLIENT_ID")
+    tenant_id = os.getenv("MICROSOFT_TENANT_ID")
+    logger.info(
+        "Startup env check microsoft_client_id=%s microsoft_tenant_id=%s env_paths=%s",
+        bool(client_id),
+        tenant_id,
+        _loaded_env_paths or "(no .env found)",
+    )
+    if not client_id or not tenant_id:
+        raise RuntimeError(
+            "Missing MICROSOFT_CLIENT_ID or MICROSOFT_TENANT_ID. "
+            f"Checked: {_loaded_env_paths or '(no .env found)'}"
+        )
 
 
 def is_superadmin(user) -> bool:
@@ -124,6 +166,32 @@ app.add_middleware(
 
 # Create DB tables
 Base.metadata.create_all(bind=engine)
+
+
+def _ensure_sqlite_oauth_schema() -> None:
+    """Best-effort SQLite compatibility patch for existing dev databases."""
+    try:
+        with engine.begin() as conn:
+            result = conn.execute(text("PRAGMA table_info(users)"))
+            columns = {row[1] for row in result.fetchall()}
+
+            if "auth_provider" not in columns:
+                conn.execute(
+                    text("ALTER TABLE users ADD COLUMN auth_provider VARCHAR NOT NULL DEFAULT 'local'")
+                )
+                logger.warning("Added missing users.auth_provider column")
+
+            if "microsoft_id" not in columns:
+                conn.execute(text("ALTER TABLE users ADD COLUMN microsoft_id VARCHAR"))
+                logger.warning("Added missing users.microsoft_id column")
+
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_users_auth_provider ON users (auth_provider)"))
+            conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_microsoft_id ON users (microsoft_id)"))
+    except Exception as exc:
+        logger.warning("SQLite schema compatibility check skipped: %s", str(exc))
+
+
+_ensure_sqlite_oauth_schema()
 
 # Mount avatars directory for serving user photos
 app.mount("/avatars", StaticFiles(directory=str(AVATARS_DIR)), name="avatars")
@@ -232,6 +300,11 @@ class RegisterRequest(BaseModel):
     company_email: str
     personal_email: str
     password: str
+
+
+class MicrosoftTokenRequest(BaseModel):
+    id_token: Optional[str] = None
+    token: Optional[str] = None
 
 # Alternative endpoint for backward compatibility - accepts JSON
 @app.post("/register/json", response_model=UserResponse)
@@ -402,7 +475,7 @@ async def login(credentials: UserLogin, request: Request, db: Session = Depends(
         # =====================================================================
         # FAILED LOGIN HANDLING
         # =====================================================================
-        if not user or not verify_password(credentials.password, user.password_hash):
+        if not user or not user.password_hash or not verify_password(credentials.password, user.password_hash):
             failed_attempts_count = (user.failed_login_attempts + 1) if user else 0
             multiple_failed = failed_attempts_count >= 3
             risk_score = calculate_login_risk_score(
@@ -667,6 +740,99 @@ async def login(credentials: UserLogin, request: Request, db: Session = Depends(
         raise HTTPException(status_code=500, detail=f"Login error: {str(e)}")
 
 # ---------------- REFRESH TOKEN ----------------
+@app.post("/login/microsoft", response_model=EnhancedTokenResponse)
+async def login_microsoft(req: MicrosoftTokenRequest, request: Request, db: Session = Depends(get_db)):
+    """Microsoft OAuth sign-in endpoint"""
+    try:
+        token = (req.id_token or req.token or "").strip()
+        if not token:
+            raise HTTPException(status_code=400, detail="Missing Microsoft id_token")
+
+        logger.info("Microsoft login request token_length=%s", len(token))
+        user_info = await verify_microsoft_token(token)
+        user = get_or_create_microsoft_user(user_info, db)
+
+        ip_address = get_client_ip(request)
+        user_agent_info = get_user_agent_info(request)
+        location_data = await get_location_from_ip(ip_address)
+        location_string = get_location_string(location_data)
+
+        session = models.Session(
+            session_id=str(uuid.uuid4()),
+            user_id=user.id,
+            device_id=None,
+            ip_address=ip_address,
+            country=location_data.get("country"),
+            city=location_data.get("city"),
+            browser=user_agent_info.get("browser"),
+            os=user_agent_info.get("os"),
+            device=user_agent_info.get("device"),
+            user_agent=user_agent_info.get("full_string"),
+            login_at=datetime.now(timezone.utc),
+            is_active=True
+        )
+        db.add(session)
+
+        oauth_log = models.Log(
+            user_id=user.id,
+            event_type="LOGIN_SUCCESS",
+            action="Successful Microsoft OAuth Login",
+            details=f"User {user.username} logged in via Microsoft OAuth",
+            ip_address=ip_address,
+            location=location_string,
+            device=user_agent_info.get("device", "Unknown"),
+            browser=user_agent_info.get("browser"),
+            os=user_agent_info.get("os"),
+            risk_score=0,
+            status="normal",
+            ip=ip_address,
+            time=datetime.now(timezone.utc)
+        )
+        db.add(oauth_log)
+
+        user.last_login_at = datetime.now(timezone.utc)
+        user.last_login = datetime.now(timezone.utc)
+        user.failed_login_attempts = 0
+        user.last_login_country = location_data.get("country")
+        user.login_ip_history = update_login_ip_history(user, ip_address)
+
+        db.commit()
+        db.refresh(session)
+
+        access_token = create_access_token({
+            "sub": str(user.id),
+            "device_id": None,
+            "session_id": session.session_id
+        })
+        refresh_token = create_refresh_token({
+            "sub": str(user.id),
+            "device_id": None,
+            "session_id": session.session_id
+        })
+
+        return {
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": "bearer",
+            "role": user.role,
+            "username": user.username,
+            "session_id": session.session_id,
+            "device": user_agent_info.get("device", "Unknown"),
+            "location": location_string
+        }
+
+    except ValueError as e:
+        db.rollback()
+        logger.warning("Microsoft OAuth validation error: %s", str(e))
+        raise HTTPException(status_code=401, detail=f"Microsoft OAuth error: {str(e)}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.exception("Microsoft login internal error")
+        raise HTTPException(status_code=500, detail="Microsoft login error")
+
+
 @app.post("/refresh-token", response_model=TokenResponse)
 def refresh_token(token: str = Query(...), db: Session = Depends(get_db)):
     """Refresh an expired access token with device-bound session validation"""
@@ -745,20 +911,100 @@ def refresh_token(token: str = Query(...), db: Session = Depends(get_db)):
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
 # ============================================================================
-# GOOGLE OAUTH LOGIN - DISABLED
+# GOOGLE OAUTH LOGIN
 # ============================================================================
-# COMMENTED OUT: Google OAuth functionality disabled - using manual login only
-# 
-# class GoogleTokenRequest(BaseModel):
-#     """Request model for Google token verification"""
-#     token: str
-# GOOGLE OAUTH ENDPOINT - FULLY DISABLED
-# All code below has been commented out - using manual email/password login only
-#
-# @app.post("/login/google", response_model=EnhancedTokenResponse)
-# async def login_google(req: GoogleTokenRequest, request: Request, db: Session = Depends(get_db)):
-#     \"\"\"Google OAuth sign-in endpoint - DISABLED\"\"\"
-#     pass  # ENDPOINT DISABLED
+class GoogleTokenRequest(BaseModel):
+    token: str
+
+
+@app.post("/login/google", response_model=EnhancedTokenResponse)
+async def login_google(req: GoogleTokenRequest, request: Request, db: Session = Depends(get_db)):
+    """Google OAuth sign-in endpoint."""
+    try:
+        if not req.token or not req.token.strip():
+            raise HTTPException(status_code=400, detail="Missing Google id_token")
+
+        user_info = await verify_google_token(req.token)
+        user = get_or_create_google_user(user_info, db)
+
+        ip_address = get_client_ip(request)
+        user_agent_info = get_user_agent_info(request)
+        location_data = await get_location_from_ip(ip_address)
+        location_string = get_location_string(location_data)
+
+        session = models.Session(
+            session_id=str(uuid.uuid4()),
+            user_id=user.id,
+            device_id=None,
+            ip_address=ip_address,
+            country=location_data.get("country"),
+            city=location_data.get("city"),
+            browser=user_agent_info.get("browser"),
+            os=user_agent_info.get("os"),
+            device=user_agent_info.get("device"),
+            user_agent=user_agent_info.get("full_string"),
+            login_at=datetime.now(timezone.utc),
+            is_active=True,
+        )
+        db.add(session)
+
+        oauth_log = models.Log(
+            user_id=user.id,
+            event_type="LOGIN_SUCCESS",
+            action="Successful Google OAuth Login",
+            details=f"User {user.username} logged in via Google OAuth",
+            ip_address=ip_address,
+            location=location_string,
+            device=user_agent_info.get("device", "Unknown"),
+            browser=user_agent_info.get("browser"),
+            os=user_agent_info.get("os"),
+            risk_score=0,
+            status="normal",
+            ip=ip_address,
+            time=datetime.now(timezone.utc),
+        )
+        db.add(oauth_log)
+
+        user.last_login_at = datetime.now(timezone.utc)
+        user.last_login = datetime.now(timezone.utc)
+        user.failed_login_attempts = 0
+        user.last_login_country = location_data.get("country")
+        user.login_ip_history = update_login_ip_history(user, ip_address)
+
+        db.commit()
+        db.refresh(session)
+
+        access_token = create_access_token({
+            "sub": str(user.id),
+            "device_id": None,
+            "session_id": session.session_id,
+        })
+        refresh_token = create_refresh_token({
+            "sub": str(user.id),
+            "device_id": None,
+            "session_id": session.session_id,
+        })
+
+        return {
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": "bearer",
+            "role": user.role,
+            "username": user.username,
+            "session_id": session.session_id,
+            "device": user_agent_info.get("device", "Unknown"),
+            "location": location_string,
+        }
+
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(status_code=401, detail=f"Google OAuth error: {str(e)}")
+    except HTTPException:
+        raise
+    except Exception:
+        db.rollback()
+        logger.exception("Google login internal error")
+        raise HTTPException(status_code=500, detail="Google login error")
 
 # ============================================================================
 # LOGOUT ----------------

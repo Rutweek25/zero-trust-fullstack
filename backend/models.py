@@ -10,10 +10,14 @@ class User(Base):
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String, unique=True, index=True, nullable=False)
     name = Column(String, nullable=False)
-    company_email = Column(String, unique=True, index=True, nullable=False)
-    personal_email = Column(String, unique=True, index=True, nullable=False)
-    password_hash = Column(String, nullable=False)
+    company_email = Column(String, unique=True, index=True, nullable=True)
+    personal_email = Column(String, unique=True, index=True, nullable=True)
+    password_hash = Column(String, nullable=True)
     role = Column(String, default="user", nullable=False)  # user, admin, superadmin
+
+    # Auth provider fields
+    auth_provider = Column(String, default="local", nullable=False, index=True)
+    microsoft_id = Column(String, unique=True, index=True, nullable=True)
     
     # Profile fields
     profile_photo = Column(String, nullable=True)

@@ -20,9 +20,11 @@ class UserResponse(BaseModel):
     id: int
     username: str
     name: str
-    company_email: str
-    personal_email: str
+    company_email: Optional[str] = None
+    personal_email: Optional[str] = None
     role: str
+    auth_provider: Optional[str] = "local"
+    microsoft_id: Optional[str] = None
     profile_photo: Optional[str] = None
     last_login: Optional[datetime] = None
     last_login_at: Optional[datetime] = None

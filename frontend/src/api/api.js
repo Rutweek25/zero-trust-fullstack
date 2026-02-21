@@ -1,4 +1,4 @@
-const API_BASE = "http://localhost:8000";
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
 
 // ---------- Save tokens ----------
 function saveTokens(access, refresh) {
@@ -81,6 +81,59 @@ export async function loginUser(data) {
   const errorMessage = result.detail 
     ? (typeof result.detail === 'string' ? result.detail : JSON.stringify(result.detail))
     : 'Login failed';
+
+  return { success: false, message: errorMessage };
+}
+
+export async function loginWithMicrosoft(token) {
+  const res = await fetch(`${API_BASE}/login/microsoft`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token })
+  });
+
+  const result = await res.json();
+
+  if (res.ok && result.access_token) {
+    saveTokens(result.access_token, result.refresh_token);
+    localStorage.setItem("role", result.role);
+    localStorage.setItem("username", result.username);
+    localStorage.setItem("loginType", "microsoft");
+    return { success: true, user: result };
+  }
+
+  const errorMessage = result.detail
+    ? (typeof result.detail === "string" ? result.detail : JSON.stringify(result.detail))
+    : "Microsoft login failed";
+
+  console.error("[Microsoft OAuth] Backend response", {
+    status: res.status,
+    detail: result.detail || result
+  });
+
+  return { success: false, message: errorMessage };
+}
+
+export async function loginWithGoogle(token) {
+  const res = await fetch(`${API_BASE}/login/google`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token })
+  });
+
+  const result = await res.json();
+
+  if (res.ok && result.access_token) {
+    saveTokens(result.access_token, result.refresh_token);
+    localStorage.setItem("role", result.role);
+    localStorage.setItem("username", result.username);
+    localStorage.setItem("loginType", "google");
+    return { success: true, user: result };
+  }
+
+  const errorMessage = result.detail
+    ? (typeof result.detail === "string" ? result.detail : JSON.stringify(result.detail))
+    : "Google login failed";
 
   return { success: false, message: errorMessage };
 }

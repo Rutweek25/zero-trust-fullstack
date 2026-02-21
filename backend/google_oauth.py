@@ -153,6 +153,7 @@ def get_or_create_google_user(user_info: dict, db: Session):
             company_email=email,  # Use Google email as company email
             personal_email=email,
             password_hash=hash_password(dummy_password),
+            auth_provider="google",
             role="user",
             status="active",
             created_at=datetime.now(timezone.utc)

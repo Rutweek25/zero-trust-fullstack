@@ -1,100 +1,99 @@
 import { useState, useEffect } from "react";
-import { loginUser, registerUser } from "../api/api";
+import { PublicClientApplication } from "@azure/msal-browser";
+import { loginUser, loginWithMicrosoft, loginWithGoogle, registerUser } from "../api/api";
 import { useNavigate } from "react-router-dom";
 
-// GOOGLE OAUTH - DISABLED
-// All Google OAuth functions commented out - using manual login only
-// 
-// // Load Google's sign-in script
-// const loadGoogleScript = () => {
-//   return new Promise((resolve) => {
-//     if (window.google) {
-//       resolve();
-//       return;
-//     }
-//     const script = document.createElement("script");
-//     script.src = "https://accounts.google.com/gsi/client";
-//     script.async = true;
-//     script.defer = true;
-//     script.onload = () => {
-//       setTimeout(resolve, 100);
-//     };
-//     document.head.appendChild(script);
-//   });
-// };
-//
-// const handleGoogleSignIn = async (credentialResponse, navigate) => {
-//   if (!credentialResponse || !credentialResponse.credential) {
-//     console.error("No credential in response:", credentialResponse);
-//     alert("Google Sign-In Error: No credential received. Please try again.");
-//     return;
-//   }
-//
-//   const token = credentialResponse.credential;
-//   console.log(`[Google OAuth] Received token (length: ${token.length})`);
-//   
-//   try {
-//     console.log("[Google OAuth] Sending token to backend...");
-//     const res = await fetch("http://localhost:8000/login/google", {
-//       method: "POST",
-//       headers: { 
-//         "Content-Type": "application/json"
-//       },
-//       body: JSON.stringify({ token })
-//     });
-//
-//     const data = await res.json();
-//     console.log(`[Google OAuth] Backend response status: ${res.status}`, data);
-//
-//     if (res.ok && data.access_token) {
-//       console.log("[Google OAuth] Login successful, storing tokens...");
-//       localStorage.setItem("access_token", data.access_token);
-//       localStorage.setItem("refresh_token", data.refresh_token);
-//       localStorage.setItem("role", data.role);
-//       localStorage.setItem("username", data.username);
-//       localStorage.setItem("loginType", "google");
-//       window.dispatchEvent(new Event("login"));
-//       
-//       console.log(`[Google OAuth] Redirecting to ${data.role === "admin" || data.role === "superadmin" ? "admin" : "dashboard"}`);
-//       
-//       if (data.role === "admin" || data.role === "superadmin") {
-//         navigate("/admin");
-//       } else {
-//         navigate("/dashboard");
-//       }
-//     } else {
-//       const errorDetail = data.detail || JSON.stringify(data);
-//       console.error("[Google OAuth] Login failed:", errorDetail);
-//       
-//       let userMessage = `Google Sign-In Error: ${errorDetail}`;
-//       
-//       // Provide helpful error messages based on specific errors
-//       if (errorDetail.includes("'NoneType' object")) {
-//         userMessage = "Backend error processing Google token. Check GOOGLE_CLIENT_ID configuration.";
-//       } else if (errorDetail.includes("not configured")) {
-//         userMessage = "Google OAuth not configured on backend. See GOOGLE_OAUTH_TROUBLESHOOTING.md";
-//       } else if (errorDetail.includes("Invalid token")) {
-//         userMessage = "Google token validation failed. Token may have expired.";
-//       } else if (errorDetail.includes("already")) {
-//         userMessage = "Email already registered. Try signing in instead.";
-//       }
-//       
-//       alert(userMessage);
-//     }
-//   } catch (err) {
-//     console.error("[Google OAuth] Network error:", err);
-//     const errorMessage = `Google Sign-In Error: ${err.message || "Connection failed"}`;
-//     
-//     // Provide specific guidance for connection errors
-//     if (err.message.includes("Failed to fetch")) {
-//       alert(`${errorMessage}\n\nMake sure backend is running on http://localhost:8000`);
-//     } else if (err.message.includes("NetworkError")) {
-//       alert(`${errorMessage}\n\nCheck backend server is accessible`);
-//     } else {
-//       alert(errorMessage);
-//     }
-//   }
-// };
+let msalInstanceSingleton = null;
+let msalInteractionLock = false;
+const MSAL_LAST_REDIRECT_STATE_KEY = "msal_last_redirect_state";
+
+function clearMsalInteractionState() {
+  const clearKeys = (storage) => {
+    const keysToRemove = [];
+    for (let index = 0; index < storage.length; index += 1) {
+      const key = storage.key(index);
+      if (key && key.toLowerCase().includes("interaction.status")) {
+        keysToRemove.push(key);
+      }
+    }
+    keysToRemove.forEach((key) => storage.removeItem(key));
+  };
+
+  clearKeys(sessionStorage);
+  clearKeys(localStorage);
+}
+
+function getMsalInstance(clientId, tenantId) {
+  if (!msalInstanceSingleton) {
+    msalInstanceSingleton = new PublicClientApplication({
+      auth: {
+        clientId,
+        authority: `https://login.microsoftonline.com/${tenantId}`,
+        redirectUri: window.location.origin
+      },
+      cache: {
+        cacheLocation: "sessionStorage"
+      }
+    });
+  }
+
+  return msalInstanceSingleton;
+}
+
+const loadGoogleScript = () => {
+  return new Promise((resolve) => {
+    if (window.google?.accounts?.id) {
+      resolve();
+      return;
+    }
+
+    const existingScript = document.querySelector('script[src="https://accounts.google.com/gsi/client"]');
+    if (existingScript) {
+      existingScript.addEventListener("load", () => resolve(), { once: true });
+      return;
+    }
+
+    const script = document.createElement("script");
+    script.src = "https://accounts.google.com/gsi/client";
+    script.async = true;
+    script.defer = true;
+    script.onload = () => resolve();
+    document.head.appendChild(script);
+  });
+};
+
+const handleGoogleSignIn = async (credentialResponse, navigate, setGoogleError) => {
+  if (!credentialResponse?.credential) {
+    setGoogleError("Google Sign-In failed: No credential received.");
+    return;
+  }
+
+  try {
+    setGoogleError("");
+    const result = await loginWithGoogle(credentialResponse.credential);
+
+    if (!result.success || !result.user?.access_token) {
+      setGoogleError(result.message || "Google Sign-In failed.");
+      return;
+    }
+
+    const data = result.user;
+    localStorage.setItem("access_token", data.access_token);
+    localStorage.setItem("refresh_token", data.refresh_token);
+    localStorage.setItem("role", data.role);
+    localStorage.setItem("username", data.username);
+    localStorage.setItem("loginType", "google");
+    window.dispatchEvent(new Event("login"));
+
+    if (data.role === "admin" || data.role === "superadmin") {
+      navigate("/admin");
+    } else {
+      navigate("/dashboard");
+    }
+  } catch (err) {
+    setGoogleError(err?.message || "Google Sign-In failed.");
+  }
+};
 
 function Login() {
   const [rightPanelActive, setRightPanelActive] = useState(false);
@@ -119,9 +118,134 @@ function Login() {
   });
 
   const [msg, setMsg] = useState("");
-  // GOOGLE OAUTH - DISABLED: googleError state removed
-  // const [googleError, setGoogleError] = useState("");
+  const [msalBusy, setMsalBusy] = useState(false);
+  const [googleError, setGoogleError] = useState("");
   const navigate = useNavigate();
+
+  useEffect(() => {
+    let isMounted = true;
+
+    async function processMicrosoftRedirect() {
+      const clientId = import.meta.env.VITE_MICROSOFT_CLIENT_ID || "b6478038-e944-4299-abf0-5eafa75416c2";
+      const tenantId = import.meta.env.VITE_MICROSOFT_TENANT_ID || "common";
+
+      if (!clientId) {
+        return;
+      }
+
+      try {
+        const msalInstance = getMsalInstance(clientId, tenantId);
+        await msalInstance.initialize();
+        const redirectResponse = await msalInstance.handleRedirectPromise();
+
+        if (!redirectResponse?.idToken || !isMounted) {
+          return;
+        }
+
+        if (redirectResponse.state) {
+          const lastState = sessionStorage.getItem(MSAL_LAST_REDIRECT_STATE_KEY);
+          if (lastState === redirectResponse.state) {
+            return;
+          }
+          sessionStorage.setItem(MSAL_LAST_REDIRECT_STATE_KEY, redirectResponse.state);
+        }
+
+        const res = await loginWithMicrosoft(redirectResponse.idToken);
+        if (!res.success || !res.user?.access_token) {
+          if (isMounted) {
+            setMsg(res.message || "Microsoft login failed ❌");
+          }
+          return;
+        }
+
+        if (isMounted) {
+          setMsg("Microsoft Login Successful ✔");
+          localStorage.setItem("role", res.user.role);
+          localStorage.setItem("username", res.user.username);
+          localStorage.setItem("loginType", "microsoft");
+          window.dispatchEvent(new Event("login"));
+
+          if (res.user.role === "admin" || res.user.role === "superadmin") {
+            navigate("/admin");
+          } else {
+            navigate("/dashboard");
+          }
+        }
+      } catch (error) {
+        console.error("Microsoft redirect login error:", error);
+        if (isMounted) {
+          setMsg(`Microsoft login failed - ${error.message}`);
+        }
+      }
+    }
+
+    processMicrosoftRedirect();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [navigate]);
+
+  async function handleMicrosoftSignIn() {
+    if (msalBusy || msalInteractionLock) {
+      setMsg("Microsoft login is already in progress. Please complete the popup.");
+      return;
+    }
+
+    const clientId = import.meta.env.VITE_MICROSOFT_CLIENT_ID || "b6478038-e944-4299-abf0-5eafa75416c2";
+    const tenantId = import.meta.env.VITE_MICROSOFT_TENANT_ID || "common";
+
+    if (!clientId) {
+      setMsg("Microsoft Sign-In is not configured. Set VITE_MICROSOFT_CLIENT_ID in frontend/.env ❌");
+      return;
+    }
+
+    try {
+      msalInteractionLock = true;
+      setMsalBusy(true);
+      const msalInstance = getMsalInstance(clientId, tenantId);
+      await msalInstance.initialize();
+      clearMsalInteractionState();
+      sessionStorage.removeItem(MSAL_LAST_REDIRECT_STATE_KEY);
+      await msalInstance.loginRedirect({
+        scopes: ["openid", "profile", "email"],
+        prompt: "select_account"
+      });
+    } catch (error) {
+      console.error("Microsoft login error:", error);
+
+      if (error?.errorCode === "interaction_in_progress") {
+        clearMsalInteractionState();
+        setMsg("Microsoft login was interrupted. Please wait 2 seconds and click once.");
+        return;
+      }
+
+      if (error?.errorCode === "no_token_request_cache_error") {
+        setMsg("Microsoft login session expired. Please try Sign in with Microsoft again.");
+        return;
+      }
+
+      if (error?.errorCode === "block_nested_popups") {
+        setMsg("Popup blocked by browser context. Retrying with redirect login...");
+        try {
+          const msalInstance = getMsalInstance(clientId, tenantId);
+          await msalInstance.loginRedirect({
+            scopes: ["openid", "profile", "email"],
+            prompt: "select_account"
+          });
+          return;
+        } catch (redirectError) {
+          setMsg(`Microsoft login failed - ${redirectError.message}`);
+          return;
+        }
+      }
+
+      setMsg(`Microsoft login failed - ${error.message}`);
+    } finally {
+      setMsalBusy(false);
+      msalInteractionLock = false;
+    }
+  }
 
   // Auto redirect if already logged in
   useEffect(() => {
@@ -129,89 +253,53 @@ function Login() {
     if (token) navigate("/dashboard");
   }, [navigate]);
 
-  // GOOGLE OAUTH - DISABLED: All Google script loading commented out
-  // // Load Google Sign-In script
-  // useEffect(() => {
-  //   loadGoogleScript();
-  // }, []);
-  //
-  // // Initialize Google Sign-In button
-  // useEffect(() => {
-  //   const initGoogle = async () => {
-  //     await loadGoogleScript();
-  //     
-  //     if (!window.google) {
-  //       console.warn("[Google OAuth] Google API not loaded");
-  //       setGoogleError("Google Sign-In library failed to load. Check internet connection.");
-  //       return;
-  //     }
-  //
-  //     console.log("[Google OAuth] Initializing Google Sign-In...");
-  //
-  //     const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID;
-  //     const currentOrigin = window.location.origin;
-  //
-  //     console.log(`[Google OAuth] Client ID: ${clientId ? clientId.substring(0, 15) + "..." : "NOT SET"}`);
-  //     console.log(`[Google OAuth] Current origin: ${currentOrigin}`);
-  //
-  //     if (!clientId || clientId === "your_google_client_id_here" || clientId.includes("undefined")) {
-  //       console.error("[Google OAuth] VITE_GOOGLE_CLIENT_ID not configured or invalid");
-  //       setGoogleError("❌ Google Sign-In not configured. Set VITE_GOOGLE_CLIENT_ID in frontend/.env");
-  //       return;
-  //     }
-  //
-  //     try {
-  //       console.log(`[Google OAuth] Calling window.google.accounts.id.initialize...`);
-  //       window.google.accounts.id.initialize({
-  //         client_id: clientId,
-  //         callback: (credentialResponse) => {
-  //           console.log("[Google OAuth] Credential callback received");
-  //           handleGoogleSignIn(credentialResponse, navigate);
-  //         }
-  //       });
-  //       
-  //       console.log("[Google OAuth] Looking for button element...");
-  //       const buttonElement = document.getElementById("google-signin-button");
-  //       if (buttonElement) {
-  //         console.log("[Google OAuth] Rendering Google sign-in button...");
-  //         window.google.accounts.id.renderButton(buttonElement, {
-  //           theme: "outline",
-  //           size: "large",
-  //           width: 300,
-  //           logo_alignment: "center"
-  //         });
-  //         console.log("[Google OAuth] Button rendered successfully");
-  //       } else {
-  //         console.warn("[Google OAuth] Button element not found");
-  //       }
-  //
-  //       // Show one-tap prompt
-  //       console.log("[Google OAuth] Attempting to show one-tap prompt...");
-  //       window.google.accounts.id.prompt((notification) => {
-  //         console.log(`[Google OAuth] Prompt shown: ${!notification.isNotDisplayed()}`);
-  //         
-  //         if (notification.isNotDisplayed && notification.isNotDisplayed()) {
-  //           const reason = notification.getNotDisplayedReason
-  //             ? notification.getNotDisplayedReason()
-  //             : "unknown";
-  //           console.warn(`[Google OAuth] Prompt not displayed. Reason: ${reason}`);
-  //           
-  //           if (reason === "invalid_origin") {
-  //             setGoogleError(
-  //               `❌ Google Sign-In blocked: origin "${currentOrigin}" not allowed.\n` +
-  //               `Add to Google Cloud Console → OAuth settings → Authorized origins`
-  //             );
-  //           }
-  //         }
-  //       });
-  //     } catch (err) {
-  //       console.error("[Google OAuth] Initialization error:", err);
-  //       setGoogleError(`Google Sign-In unavailable: ${err.message}`);
-  //     }
-  //   };
-  //
-  //   initGoogle();
-  // }, [navigate]);
+  useEffect(() => {
+    let isMounted = true;
+
+    const initGoogle = async () => {
+      const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID;
+
+      if (!clientId || clientId === "your_google_client_id_here" || clientId.includes("undefined")) {
+        if (isMounted) setGoogleError("Google Sign-In not configured. Set VITE_GOOGLE_CLIENT_ID in frontend/.env");
+        return;
+      }
+
+      try {
+        await loadGoogleScript();
+
+        if (!window.google?.accounts?.id) {
+          if (isMounted) setGoogleError("Google Sign-In library failed to load.");
+          return;
+        }
+
+        window.google.accounts.id.initialize({
+          client_id: clientId,
+          callback: (credentialResponse) => {
+            handleGoogleSignIn(credentialResponse, navigate, setGoogleError);
+          }
+        });
+
+        const buttonElement = document.getElementById("google-signin-button");
+        if (buttonElement) {
+          buttonElement.innerHTML = "";
+          window.google.accounts.id.renderButton(buttonElement, {
+            theme: "outline",
+            size: "large",
+            width: 300,
+            logo_alignment: "center"
+          });
+        }
+      } catch (err) {
+        if (isMounted) setGoogleError(err?.message || "Google Sign-In initialization failed.");
+      }
+    };
+
+    initGoogle();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [navigate]);
 
   // Email validation helper
   function isValidEmail(email) {
@@ -449,9 +537,11 @@ function Login() {
         <form onSubmit={handleLoginSubmit}>
           <h1>Sign in</h1>
           <p className="auth-subtitle">Continue into your Zero Trust workspace.</p>
+
+          <button type="button" onClick={handleMicrosoftSignIn} disabled={msalBusy} style={{ marginBottom: "10px" }}>
+            {msalBusy ? "Signing in with Microsoft..." : "Sign in with Microsoft"}
+          </button>
           
-          {/* GOOGLE OAUTH - DISABLED: Google Sign-In Button removed */}
-          {/* 
           <div 
             id="google-signin-button" 
             style={{ 
@@ -483,7 +573,6 @@ function Login() {
             <span style={{ fontSize: "12px" }}>OR</span>
             <div style={{ flex: 1, height: "1px", backgroundColor: "var(--border)" }} />
           </div>
-          */}
 
           <input type="email" placeholder="Email"
             value={loginForm.email}

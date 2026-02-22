@@ -143,6 +143,17 @@ logs
 .env.test.local
 .env.production.local
 .env.*.local
+backend/.env
+agent/.env
+frontend/.env
+*.pem
+*.key
+*.p12
+*.pfx
+
+# User-generated uploads
+backend/avatars/*
+!backend/avatars/.gitkeep
 
 # Build outputs
 dist/
@@ -156,5 +167,6 @@ build/
 # yarn.lock
 # pnpm-lock.yaml
 
-# Markdown files
-*.md
+# Keep env examples tracked
+!.env.example
+!*.env.example

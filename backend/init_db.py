@@ -3,6 +3,7 @@ Create database with proper schema and seed with users
 """
 import os
 from datetime import datetime, timezone
+from time_utils import now_ist
 from passlib.context import CryptContext
 
 # Import models and database
@@ -40,7 +41,7 @@ def init_database():
         password_hash=pwd_context.hash("super@1234"),
         role="superadmin",
         status="active",
-        created_at=datetime.now(timezone.utc)
+        created_at=now_ist()
     )
     db.add(superadmin)
     db.flush()  # Get the ID
@@ -56,7 +57,7 @@ def init_database():
         password_hash=pwd_context.hash("admin@1234"),
         role="admin",
         status="active",
-        created_at=datetime.now(timezone.utc)
+        created_at=now_ist()
     )
     db.add(admin)
     db.flush()
@@ -100,7 +101,7 @@ def init_database():
             password_hash=pwd_context.hash(user_data["password"]),
             role=user_data["role"],
             status="active",
-            created_at=datetime.now(timezone.utc)
+            created_at=now_ist()
         )
         db.add(user)
         print(f"   ✓ {user_data['username']}: {user_data['company_email']}")

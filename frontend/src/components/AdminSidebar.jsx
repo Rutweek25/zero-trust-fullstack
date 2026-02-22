@@ -1,7 +1,6 @@
 import { Link, useLocation } from "react-router-dom";
 import { useState, useEffect } from "react";
 import { getProfile } from "../api/api";
-import LogoutBtn from "./LogoutBtn";
 
 export default function AdminSidebar() {
   const location = useLocation();
@@ -71,6 +70,12 @@ export default function AdminSidebar() {
         </Link>
         <Link to="/admin/logs" style={navItemStyle("/admin/logs")}>
           <span>📋</span> Recent Logs
+        </Link>
+        <Link to="/admin/usb-events" style={navItemStyle("/admin/usb-events")}>
+          <span>🔌</span> USB Events
+        </Link>
+        <Link to="/admin/login-history" style={navItemStyle("/admin/login-history")}>
+          <span>🌍</span> Login History
         </Link>
         <Link to="/admin/users" style={navItemStyle("/admin/users")}>
           <span>👥</span> Users

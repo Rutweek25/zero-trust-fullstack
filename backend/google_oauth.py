@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 import os
 from pathlib import Path
 from datetime import datetime, timezone
+from time_utils import now_ist
 from sqlalchemy.orm import Session
 import models
 from auth import hash_password
@@ -156,7 +157,7 @@ def get_or_create_google_user(user_info: dict, db: Session):
             auth_provider="google",
             role="user",
             status="active",
-            created_at=datetime.now(timezone.utc)
+            created_at=now_ist()
         )
         
         db.add(new_user)

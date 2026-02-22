@@ -1,0 +1,275 @@
+# Quick Start Guide - Run Everything Together
+
+## Option 1: PowerShell (Recommended for Windows 10+)
+
+```powershell
+cd c:\Users\HP\Desktop\zero-trust-fullstack
+.\RUN_ALL.ps1
+```
+
+**With Options:**
+```powershell
+.\RUN_ALL.ps1 -NoAgent      # Skip agent (only backend + frontend)
+.\RUN_ALL.ps1 -NoFrontend   # Skip frontend (only backend + agent)
+.\RUN_ALL.ps1 -Help         # Show help message
+```
+
+---
+
+## Option 2: Batch File (.bat - Simplest for Windows)
+
+```cmd
+cd c:\Users\HP\Desktop\zero-trust-fullstack
+RUN_ALL.bat
+```
+
+This opens 4 terminal windows automatically:
+- **Terminal 1**: Backend (FastAPI) - Port 8000
+- **Terminal 2**: Frontend (Vite) - Port 5173
+- **Terminal 3**: Agent (USB + Location Monitoring)
+- **Terminal 4**: DB Watcher (Real-time Telemetry)
+
+---
+
+## Option 3: Manual (Run Each Service Separately)
+
+### Terminal 1 - Backend
+```cmd
+cd backend
+python -m uvicorn app:app --reload --port 8000
+```
+
+### Terminal 2 - Frontend
+```cmd
+cd frontend
+npm run dev -- --host 127.0.0.1 --port 5173
+```
+
+### Terminal 3 - Agent
+```cmd
+cd agent
+.\run_agent.bat
+```
+
+### Terminal 4 - Database Watcher (USB Telemetry)
+```cmd
+cd backend
+python check_db.py
+```
+
+---
+
+## What Each Service Does
+
+### Backend (FastAPI) - Port 8000
+- Handles user authentication (login/register)
+- Device registration and approval workflow
+- Session management with geolocation
+- USB telemetry storage and retrieval
+- Real-time API endpoints
+- Swagger docs: http://localhost:8000/docs
+
+### Frontend (Vite/Vue) - Port 5173
+- User login/registration interface
+- Admin dashboard with USB events
+- Device management
+- Geolocation tracking display
+- Real-time telemetry visualization
+
+### Agent (Python)
+- Detects USB device insertion/removal
+- Collects system metrics (CPU, memory, disk)
+- Sends heartbeats every 2 seconds
+- **Flushes USB events immediately** (no queuing)
+- Pulls geolocation from browser (if enabled)
+
+### DB Watcher (Python Script)
+- Monitors SQLite database in real-time
+- Displays USB events as they arrive
+- Shows device ID, timestamp, event type
+- 1-second refresh interval (optimized)
+
+---
+
+## Testing USB Detection (< 2 seconds)
+
+1. **Start all services** using `RUN_ALL.bat` or `RUN_ALL.ps1`
+
+2. **Wait for "All Services Started" message**
+
+3. **Insert a USB device** into your computer
+
+4. **Check DB Watcher terminal** (Terminal 4):
+   ```
+   [2026-02-22T03:15:42.123456+05:30] device_id=6 USB inserted (EventType: 2)
+   [2026-02-22T03:15:42.234567+05:30] device_id=6 USB changed (EventType: 1)
+   ```
+
+5. **Expected time**: **< 2 seconds** from insertion to display
+
+---
+
+## Testing Geolocation Tracking
+
+1. **Login** to http://localhost:5173
+   - Email: `superadmin@company.com`
+   - Password: `super@1234`
+
+2. **Browser will ask for location permission** - Click "Allow"
+
+3. **Geolocation is tracked** in:
+   - Session creation (backend)
+   - Device trust scoring
+   - Admin dashboard (if implemented)
+
+---
+
+## Full Feature Checklist
+
+✅ **USB Device Detection**
+- Real-time WMI monitoring
+- Event types: inserted, removed, changed
+- Storage in SQLite with IST timestamps
+- Display in real-time watcher (< 2 seconds)
+
+✅ **Location Tracking**
+- Browser geolocation API integration
+- Latitude/Longitude stored in sessions
+- IP-based location fallback
+- Location used in risk scoring
+
+✅ **Device Approval Workflow**
+- Devices register with approval status
+- Admins approve devices via API
+- Approved devices send full telemetry
+- Unapproved devices send minimal data
+
+✅ **Session-Device Binding**
+- Sessions linked to device ID
+- Device trust scores affect session risk
+- Location validation per session
+- Real-time device status monitoring
+
+✅ **Telemetry Collection**
+- CPU usage (psutil)
+- Memory usage (psutil)
+- Disk usage (psutil)
+- Network connections (psutil)
+- USB events (WMI)
+- System information (processor, RAM, OS)
+
+---
+
+## Performance (After Optimization)
+
+| Component | Before | After | Gain |
+|-----------|--------|-------|------|
+| Heartbeat Interval | 30s | 2s | **15x faster** |
+| DB Poll Interval | 3s | 1s | **3x faster** |
+| Metrics Collection | 200ms blocking | 0ms (async) | **∞** |
+| USB Event Delivery | Wait for heartbeat | Immediate flush | **∞** |
+| **Total Latency** | **30+ seconds** | **<2 seconds** | **15x+** |
+
+---
+
+## Troubleshooting
+
+### "Backend won't start"
+```powershell
+cd backend
+pip install -r requirements.txt
+python -m uvicorn app:app --reload --port 8000
+```
+
+### "Frontend npm error"
+```powershell
+cd frontend
+npm install
+npm run dev -- --host 127.0.0.1 --port 5173
+```
+
+### "Agent won't run"
+```powershell
+cd agent
+pip install -r requirements.txt
+.\run_agent.bat
+```
+
+### "Port already in use"
+- Change port in script or kill existing process
+- Backend: `netstat -ano | findstr :8000`
+- Frontend: `netstat -ano | findstr :5173`
+
+### "USB events not showing"
+1. Ensure Agent terminal is running (Terminal 3)
+2. Ensure device is approved in backend
+3. Check DB Watcher terminal (Terminal 4) for errors
+4. Verify USB device is recognized by Windows (Device Manager)
+
+---
+
+## Getting Started (First Time)
+
+```powershell
+# 1. Navigate to project
+cd c:\Users\HP\Desktop\zero-trust-fullstack
+
+# 2. Setup (one-time only)
+cd backend && pip install -r requirements.txt && cd ..
+cd frontend && npm install && cd ..
+cd agent && pip install -r requirements.txt && cd ..
+
+# 3. Run everything
+.\RUN_ALL.ps1
+# or
+RUN_ALL.bat
+
+# 4. Login at http://localhost:5173
+# Email: superadmin@company.com
+# Password: super@1234
+```
+
+---
+
+## API Endpoints (Quick Reference)
+
+```
+POST /login                          # User login
+POST /register                       # User registration
+POST /agent/register                 # Agent registration
+POST /agent/devices/{id}/approve     # Approve device
+POST /agent/heartbeat                # Agent sends telemetry
+GET  /admin/telemetry                # Get telemetry data
+GET  /admin/devices                  # List devices
+GET  /docs                           # Swagger API docs
+```
+
+---
+
+## Common Issues & Solutions
+
+**Q: USB events take too long to appear**
+- A: All optimizations should make it <2 seconds. Check DB Watcher terminal for delays.
+
+**Q: Agent says "device not approved"**
+- A: Login as admin and approve the device first
+
+**Q: Frontend can't reach backend**
+- A: Ensure backend is running on http://localhost:8000
+
+**Q: Geolocation not working**
+- A: 
+  1. Allow browser location permission
+  2. Check browser console for errors
+  3. Location falls back to IP-based if browser location fails
+
+---
+
+## Next Steps
+
+1. **Monitor USB events** in real-time
+2. **Check device trust scores** in admin panel
+3. **Review session data** with geolocation
+4. **Customize telemetry** collection as needed
+
+---

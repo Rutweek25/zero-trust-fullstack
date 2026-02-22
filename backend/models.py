@@ -1,7 +1,8 @@
 from sqlalchemy import Column, Integer, String, DateTime, Text, ForeignKey, Boolean, Float
 from sqlalchemy.orm import relationship
 from database import Base
-from datetime import datetime, timezone
+from datetime import datetime
+from time_utils import now_ist
 import uuid
 
 class User(Base):
@@ -22,7 +23,7 @@ class User(Base):
     # Profile fields
     profile_photo = Column(String, nullable=True)
     status = Column(String, default="active", nullable=False)  # active, inactive, locked
-    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=now_ist, nullable=False)
     
     # PHASE 1: Enhanced tracking fields
     last_login_at = Column(DateTime(timezone=True), nullable=True)
@@ -59,14 +60,23 @@ class Session(Base):
     country = Column(String, nullable=True)
     city = Column(String, nullable=True)
     
+    # GPS Coordinates (from browser geolocation)
+    latitude = Column(Float, nullable=True)
+    longitude = Column(Float, nullable=True)
+    
     # Device info
     browser = Column(String, nullable=True)
     os = Column(String, nullable=True)
     device = Column(String, nullable=True)
     user_agent = Column(Text, nullable=True)
     
+    # Security & Risk Assessment
+    risk_score = Column(Float, default=0.0, nullable=False)  # 0.0 to 1.0
+    status = Column(String, default="normal", nullable=False, index=True)  # normal, suspicious, critical
+    risk_factors = Column(Text, nullable=True)  # JSON array of detected risk factors
+    
     # Session timing
-    login_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
+    login_at = Column(DateTime(timezone=True), default=now_ist, nullable=False, index=True)
     logout_at = Column(DateTime(timezone=True), nullable=True)
     is_active = Column(Boolean, default=True, nullable=False, index=True)
     
@@ -100,10 +110,10 @@ class Log(Base):
     status = Column(String, default="normal", nullable=False, index=True)  # normal, suspicious, critical
     
     # Timing
-    timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
+    timestamp = Column(DateTime(timezone=True), default=now_ist, nullable=False, index=True)
     
     # Legacy field for backward compatibility
-    time = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
+    time = Column(DateTime(timezone=True), default=now_ist, nullable=False, index=True)
     ip = Column(String, nullable=True)  # Legacy field
     
     def __repr__(self):
@@ -132,7 +142,7 @@ class LockUnlockRequest(Base):
     review_comment = Column(Text, nullable=True)
     
     # Timestamps
-    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), default=now_ist, nullable=False, index=True)
     
     def __repr__(self):
         return f"<LockUnlockRequest(id={self.id}, user_id={self.user_id}, action={self.action}, status={self.status})>"
@@ -153,8 +163,8 @@ class Device(Base):
     os_version = Column(String(100), nullable=True)  # Specific OS version for agents
     
     # Tracking
-    first_registered_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
-    last_seen_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
+    first_registered_at = Column(DateTime(timezone=True), default=now_ist, nullable=False)
+    last_seen_at = Column(DateTime(timezone=True), default=now_ist, nullable=False, index=True)
     
     # Trust management
     is_active = Column(Boolean, default=True, nullable=False, index=True)
@@ -189,7 +199,7 @@ class Telemetry(Base):
     device_id = Column(Integer, ForeignKey("devices.id", ondelete="CASCADE"), nullable=False, index=True)
     
     # Timestamp of collection
-    collected_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
+    collected_at = Column(DateTime(timezone=True), default=now_ist, nullable=False, index=True)
     
     # System metrics (stored as serialized JSON for flexibility)
     metrics = Column(Text, nullable=True)  # JSON: {cpu, memory, disk, processes, network, users, usb_devices}

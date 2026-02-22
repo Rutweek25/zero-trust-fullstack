@@ -2,6 +2,7 @@ from fastapi import Depends, HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import jwt, JWTError
 from auth import SECRET_KEY, ALGORITHM
+from time_utils import now_ist, ensure_ist
 from database import SessionLocal
 from sqlalchemy.orm import Session
 import models
@@ -91,9 +92,10 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
             )
 
         # Server-side session expiration enforcement (in addition to JWT exp)
-        from datetime import datetime, timezone
+        from datetime import timezone
         if hasattr(session, 'expires_at') and session.expires_at:
-            if session.expires_at < datetime.now(timezone.utc):
+            expires_at = ensure_ist(session.expires_at)
+            if expires_at and expires_at < now_ist():
                 raise HTTPException(
                     status_code=401,
                     detail="Session expired"
@@ -154,14 +156,15 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
                 )
 
             # PHASE B: Check if device is online (last_seen_at within 90 seconds)
-            from datetime import datetime, timezone, timedelta
+            from datetime import timezone, timedelta
             if device.last_seen_at is None:
                 raise HTTPException(
                     status_code=403,
                     detail="Device has never reported heartbeat"
                 )
-            
-            time_since_last_seen = datetime.now(timezone.utc) - device.last_seen_at
+
+            last_seen_at = ensure_ist(device.last_seen_at)
+            time_since_last_seen = now_ist() - last_seen_at
             if time_since_last_seen > timedelta(seconds=90):
                 raise HTTPException(
                     status_code=403,

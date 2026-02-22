@@ -73,6 +73,8 @@ export default function AdminLayout() {
 function getPageTitle(pathname) {
   if (pathname === "/admin" || pathname === "/admin/profile") return "👤 Admin Profile";
   if (pathname === "/admin/logs") return "📋 Recent Logs";
+  if (pathname === "/admin/usb-events") return "🔌 USB Events";
+  if (pathname === "/admin/login-history") return "🌍 Login History";
   if (pathname === "/admin/users") return "👥 Users Management";
   if (pathname.includes("/admin/users/") && pathname.includes("/logs")) return "📋 User Activity Logs";
   return "🛡 Admin Dashboard";

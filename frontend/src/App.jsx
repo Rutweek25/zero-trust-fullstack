@@ -12,6 +12,8 @@ import AdminUsers from "./pages/admin/Users";
 import AdminUserLogs from "./pages/admin/UserLogs";
 import UserManagement from "./pages/admin/UserManagement";
 import PendingRequests from "./pages/admin/PendingRequests";
+import AdminUsbEvents from "./pages/admin/UsbEvents";
+import LoginHistory from "./pages/admin/LoginHistory";
 import LogoutBtn from "./components/LogoutBtn";
 
 function App() {
@@ -130,6 +132,8 @@ function App() {
           <Route path="/admin" element={<AdminProfile />} />
           <Route path="/admin/profile" element={<AdminProfile />} />
           <Route path="/admin/logs" element={<AdminLogs />} />
+          <Route path="/admin/usb-events" element={<AdminUsbEvents />} />
+          <Route path="/admin/login-history" element={<LoginHistory />} />
           <Route path="/admin/users" element={<AdminUsers />} />
           <Route path="/admin/users/:userId/logs" element={<AdminUserLogs />} />
           <Route path="/admin/user-management" element={<UserManagement />} />

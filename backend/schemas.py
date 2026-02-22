@@ -15,6 +15,7 @@ class UserLogin(BaseModel):
     username: str  # now an email
     password: str
     device_uuid: Optional[str] = None  # Optional - will auto-generate if not provided
+    browser_location: Optional[dict[str, Any]] = None
 
 class UserResponse(BaseModel):
     id: int
@@ -54,6 +55,32 @@ class SessionResponse(BaseModel):
     browser: Optional[str]
     os: Optional[str]
     device: Optional[str]
+    login_at: datetime
+    logout_at: Optional[datetime]
+    is_active: bool
+    
+    class Config:
+        from_attributes = True
+
+
+class EnhancedSessionResponse(BaseModel):
+    """Enhanced session response with geolocation and risk assessment"""
+    id: int
+    session_id: str
+    user_id: int
+    username: Optional[str] = None  # Joined from User table
+    ip_address: str
+    country: Optional[str]
+    city: Optional[str]
+    latitude: Optional[float]
+    longitude: Optional[float]
+    browser: Optional[str]
+    os: Optional[str]
+    device: Optional[str]
+    user_agent: Optional[str]
+    risk_score: float
+    status: str  # normal, suspicious, critical
+    risk_factors: Optional[str]  # JSON string of risk factors
     login_at: datetime
     logout_at: Optional[datetime]
     is_active: bool
@@ -154,6 +181,13 @@ class AdminUserLogsResponse(BaseModel):
 class AdminSessionsResponse(BaseModel):
     data: list[SessionResponse]
     pagination: Pagination
+
+
+class LoginHistoryResponse(BaseModel):
+    """Response model for admin login history with enhanced security data"""
+    data: list[EnhancedSessionResponse]
+    pagination: Pagination
+    summary: dict[str, Any] = {}  # Summary statistics (total logins, suspicious percentage, etc.)
 
 # =============================================================================
 # Token Schemas

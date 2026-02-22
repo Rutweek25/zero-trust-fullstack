@@ -6,7 +6,8 @@ import json
 import ipaddress
 from user_agents import parse
 from fastapi import Request
-from typing import Optional, Dict
+from typing import Optional, Dict, Tuple
+from time_utils import now_ist, ensure_ist
 import logging
 
 logger = logging.getLogger(__name__)
@@ -104,6 +105,115 @@ def get_user_agent_info(request: Request) -> Dict[str, Optional[str]]:
 # =============================================================================
 # GEOLOCATION FROM IP
 # =============================================================================
+
+def _parse_float(value: object) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def _extract_browser_coordinates(
+    browser_location: Optional[dict],
+    request: Optional[Request] = None
+) -> Tuple[Optional[float], Optional[float], Optional[str]]:
+    if isinstance(browser_location, dict):
+        lat = _parse_float(browser_location.get("latitude"))
+        lon = _parse_float(browser_location.get("longitude"))
+        status = browser_location.get("permission_status")
+        if lat is not None and lon is not None:
+            return lat, lon, status or "granted"
+
+    if request is not None:
+        lat = _parse_float(request.headers.get("X-User-Latitude"))
+        lon = _parse_float(request.headers.get("X-User-Longitude"))
+        if lat is not None and lon is not None:
+            return lat, lon, "granted"
+
+    return None, None, None
+
+
+async def get_location_from_coordinates(latitude: float, longitude: float) -> Dict[str, Optional[str]]:
+    """
+    Reverse geocode GPS coordinates using OpenStreetMap Nominatim.
+
+    Returns:
+        {
+            "country": "United States",
+            "city": "New York",
+            "region": "New York",
+            "timezone": "UTC",
+            "isp": "Browser GPS",
+            "full_address": "..."
+        }
+    """
+    try:
+        params = {
+            "format": "json",
+            "lat": latitude,
+            "lon": longitude,
+            "zoom": 12,
+            "addressdetails": 1
+        }
+        headers = {
+            "User-Agent": "zero-trust-fullstack/1.0"
+        }
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(
+                "https://nominatim.openstreetmap.org/reverse",
+                params=params,
+                headers=headers
+            )
+
+        if response.status_code == 200:
+            data = response.json()
+            address = data.get("address", {}) if isinstance(data, dict) else {}
+
+            city = (
+                address.get("city")
+                or address.get("town")
+                or address.get("village")
+                or address.get("hamlet")
+            )
+            region = address.get("state") or address.get("region")
+            country = address.get("country")
+
+            return {
+                "country": country or "Unknown",
+                "city": city or "Unknown",
+                "region": region or "Unknown",
+                "timezone": "UTC",
+                "isp": "Browser GPS",
+                "full_address": data.get("display_name") if isinstance(data, dict) else None
+            }
+    except Exception as e:
+        logger.error(f"Reverse geocoding error for coords {latitude}, {longitude}: {e}")
+
+    return {
+        "country": "Unknown",
+        "city": "Unknown",
+        "region": "Unknown",
+        "timezone": "UTC",
+        "isp": "Unknown",
+        "full_address": None
+    }
+
+
+async def resolve_location_data(
+    ip_address: str,
+    request: Request,
+    browser_location: Optional[dict]
+) -> Tuple[Dict[str, Optional[str]], Optional[float], Optional[float]]:
+    lat, lon, status = _extract_browser_coordinates(browser_location, request)
+    if lat is not None and lon is not None and status == "granted":
+        gps_data = await get_location_from_coordinates(lat, lon)
+        if gps_data.get("country") != "Unknown" or gps_data.get("city") != "Unknown":
+            return gps_data, lat, lon
+
+    ip_data = await get_location_from_ip(ip_address)
+    return ip_data, lat, lon
 
 async def get_location_from_ip(ip_address: str) -> Dict[str, Optional[str]]:
     """
@@ -283,18 +393,15 @@ def calculate_agent_trust_score(
     Returns:
         Updated trust score (0-100)
     """
-    from datetime import datetime, timezone, timedelta
+    from datetime import timedelta
     
     updated_score = current_score
-    now = datetime.now(timezone.utc)
+    now = now_ist()
     
     # Check if device is stale (>2 minutes without heartbeat)
     if last_seen_at:
         try:
-            # Ensure last_seen_at is timezone-aware
-            if last_seen_at.tzinfo is None:
-                last_seen_at = last_seen_at.replace(tzinfo=timezone.utc)
-            
+            last_seen_at = ensure_ist(last_seen_at)
             time_since_last_seen = now - last_seen_at
             if time_since_last_seen > timedelta(minutes=2):
                 updated_score -= 20
@@ -383,18 +490,17 @@ def validate_agent_token_rotation(
     Returns:
         True if token requires rotation, False if still valid
     """
-    from datetime import datetime, timezone, timedelta
+    from datetime import timedelta
     
     if agent_token_rotated_at is None:
         # Never rotated - must rotate now
         return True
     
     try:
-        # Ensure timezone-aware
-        if agent_token_rotated_at.tzinfo is None:
-            agent_token_rotated_at = agent_token_rotated_at.replace(tzinfo=timezone.utc)
-        
-        age = datetime.now(timezone.utc) - agent_token_rotated_at
+        rotated_at = ensure_ist(agent_token_rotated_at)
+        if rotated_at is None:
+            return True
+        age = now_ist() - rotated_at
         return age > timedelta(days=max_age_days)
     except Exception as e:
         logger.error(f"Error checking token age: {e}")
@@ -418,7 +524,7 @@ def revoke_device_sessions(db, device_id: int, reason: str = "Trust score thresh
     Returns:
         Number of sessions revoked
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
     
     try:
         # Find all active sessions for this device
@@ -431,7 +537,7 @@ def revoke_device_sessions(db, device_id: int, reason: str = "Trust score thresh
         ).all()
         
         revoked_count = 0
-        now = datetime.now(timezone.utc)
+        now = now_ist()
         
         for session in sessions_to_revoke:
             session.is_active = False
@@ -450,3 +556,414 @@ def revoke_device_sessions(db, device_id: int, reason: str = "Trust score thresh
         logger.error(f"Error revoking device sessions: {e}")
         db.rollback()
         return 0
+
+
+# =============================================================================
+# ENHANCED RISK SCORING & SUSPICIOUS LOGIN DETECTION
+# =============================================================================
+
+def calculate_comprehensive_risk_score(
+    user_id: int,
+    ip_address: str,
+    country: str,
+    city: Optional[str],
+    browser: str,
+    os: str,
+    device: str,
+    login_hour: int,
+    db
+) -> tuple[float, list[str]]:
+    """
+    Calculate sophisticated risk score for login attempt.
+    
+    Risk factors weighted 0.0-1.0:
+    - New country: 0.4 (HIGH RISK)
+    - New IP address: 0.2 (MEDIUM RISK)  
+    - New device/browser: 0.2 (MEDIUM RISK)
+    - Unusual login time: 0.1 (LOW RISK)
+    - Rapid location change: 0.3 (HIGH RISK)
+    - First-time login: 0.15 (MEDIUM-LOW RISK)
+    
+    Returns:
+        (risk_score, risk_factors)
+        - risk_score: 0.0 (safe) to 1.0 (critical)
+        - risk_factors: list of detected issues
+    """
+    from models import Session as SessionModel, User
+    from datetime import timedelta
+    
+    risk_score = 0.0
+    risk_factors = []
+    
+    # Fetch user's historical data
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        return 0.5, ["User not found"]
+    
+    # Get user's previous sessions
+    previous_sessions = db.query(SessionModel).filter(
+        SessionModel.user_id == user_id
+    ).order_by(SessionModel.login_at.desc()).limit(20).all()
+    
+    # Factor 1: New Country (HIGH RISK)
+    previous_countries = set([s.country for s in previous_sessions if s.country])
+    if country and country not in ["LOCAL", "UNKNOWN", "Unknown"]:
+        if previous_countries and country not in previous_countries:
+            risk_score += 0.4
+            risk_factors.append(f"New country: {country}")
+    
+    # Factor 2: New IP Address (MEDIUM RISK)
+    previous_ips = set([s.ip_address for s in previous_sessions if s.ip_address])
+    if ip_address not in previous_ips and ip_address not in ["127.0.0.1", "localhost"]:
+        risk_score += 0.2
+        risk_factors.append(f"New IP address")
+    
+    # Factor 3: New Device/Browser Combination (MEDIUM RISK)
+    previous_browsers = set([f"{s.browser}|{s.os}" for s in previous_sessions if s.browser and s.os])
+    current_device_sig = f"{browser}|{os}"
+    if previous_browsers and current_device_sig not in previous_browsers:
+        risk_score += 0.2
+        risk_factors.append(f"New device/browser")
+    
+    # Factor 4: Unusual Login Time (LOW RISK)
+    if previous_sessions:
+        login_hours = [s.login_at.hour for s in previous_sessions if s.login_at]
+        if login_hours:
+            hour_frequency = login_hours.count(login_hour) / len(login_hours)
+            # Flag if this hour appears < 10% of time and we have enough data
+            if hour_frequency < 0.1 and len(login_hours) >= 5:
+                risk_score += 0.1
+                risk_factors.append(f"Unusual login time: {login_hour}:00")
+    
+    # Factor 5: Rapid location change (HIGH RISK)
+    if previous_sessions:
+        last_session = previous_sessions[0]
+        last_login_at = ensure_ist(last_session.login_at)
+        time_since_last = now_ist() - last_login_at
+        
+        if time_since_last < timedelta(hours=2):
+            if last_session.country and country:
+                if last_session.country != country and country not in ["LOCAL", "UNKNOWN"]:
+                    risk_score += 0.3
+                    risk_factors.append(f"Rapid location change: {last_session.country} → {country}")
+    
+    # Factor 6: First-time login (MEDIUM-LOW RISK)
+    if not previous_sessions:
+        risk_score += 0.15
+        risk_factors.append("First login from this account")
+    
+    # Cap risk score at 1.0
+    risk_score = min(risk_score, 1.0)
+    
+    return risk_score, risk_factors
+
+
+def get_comprehensive_risk_status(risk_score: float) -> str:
+    """
+    Convert float risk score to status category.
+    
+    - 0.0 - 0.3: normal (green)
+    - 0.3 - 0.6: suspicious (yellow)
+    - 0.6 - 1.0: critical (red)
+    """
+    if risk_score < 0.3:
+        return "normal"
+    elif risk_score < 0.6:
+        return "suspicious"
+    else:
+        return "critical"
+
+
+# =============================================================================
+# EMAIL ALERTS FOR SUSPICIOUS LOGINS
+# =============================================================================
+
+async def send_suspicious_login_email(
+    user_email: str,
+    user_name: str,
+    ip_address: str,
+    country: str,
+    city: str,
+    latitude: Optional[float],
+    longitude: Optional[float],
+    browser: str,
+    os: str,
+    timestamp,
+    risk_score: float,
+    risk_factors: list[str]
+) -> bool:
+    """
+    Send email alert for suspicious login attempt.
+    
+    Email includes:
+    - IP, Country, City, Timestamp
+    - Risk score and factors
+    - Google Maps link (if lat/lng available)
+    - Browser and OS info
+    
+    Returns:
+        True if email sent successfully, False otherwise
+    """
+    import smtplib
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+    import os
+    
+    # Get SMTP config from environment
+    smtp_host = os.getenv("SMTP_HOST", "smtp.gmail.com")
+    smtp_port = int(os.getenv("SMTP_PORT", "587"))
+    smtp_user = os.getenv("SMTP_USER")
+    smtp_password = os.getenv("SMTP_PASSWORD")
+    from_email = os.getenv("ALERT_FROM_EMAIL", smtp_user)
+    
+    # Skip if SMTP not configured
+    if not smtp_user or not smtp_password:
+        logger.warning(f"⚠️ SMTP not configured - skipping email alert for {user_email}")
+        return False
+    
+    # Build email content
+    subject = f"⚠️ Suspicious Login Detected - {country}"
+    
+    # Create Google Maps link if coordinates available
+    maps_link = ""
+    if latitude and longitude:
+        maps_link = f"https://www.google.com/maps?q={latitude},{longitude}"
+    
+    # Format risk factors as bullet list
+    factors_html = "<ul>"
+    for factor in risk_factors:
+        factors_html += f"<li>{factor}</li>"
+    factors_html += "</ul>"
+    
+    # Determine risk level color
+    if risk_score >= 0.6:
+        risk_color = "#dc3545"  # red
+        risk_level = "CRITICAL"
+    elif risk_score >= 0.3:
+        risk_color = "#ffc107"  # yellow
+        risk_level = "SUSPICIOUS"
+    else:
+        risk_color = "#28a745"  # green
+        risk_level = "NORMAL"
+    
+    html_body = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <style>
+            body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
+            .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+            .header {{ background: #f8f9fa; padding: 20px; border-radius: 5px; text-align: center; }}
+            .alert {{ background: #fff3cd; padding: 15px; border-left: 4px solid #ffc107; margin: 20px 0; }}
+            .info-table {{ width: 100%; border-collapse: collapse; margin: 20px 0; }}
+            .info-table th {{ background: #f8f9fa; padding: 10px; text-align: left; }}
+            .info-table td {{ padding: 10px; border-bottom: 1px solid #dee2e6; }}
+            .risk-badge {{ display: inline-block; padding: 5px 15px; border-radius: 20px; 
+                          background: {risk_color}; color: white; font-weight: bold; }}
+            .button {{ display: inline-block; padding: 12px 24px; background: #007bff; 
+                      color: white; text-decoration: none; border-radius: 5px; margin: 10px 0; }}
+            .footer {{ text-align: center; padding: 20px; font-size: 12px; color: #6c757d; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h2>🔒 Zero Trust Security Alert</h2>
+                <p>Suspicious login activity detected on your account</p>
+            </div>
+            
+            <div class="alert">
+                <strong>Hello {user_name},</strong><br>
+                We detected a login to your account that appears unusual based on your typical behavior.
+            </div>
+            
+            <table class="info-table">
+                <tr>
+                    <th colspan="2">Login Details</th>
+                </tr>
+                <tr>
+                    <td><strong>Time:</strong></td>
+                    <td>{timestamp.strftime('%B %d, %Y at %I:%M %p UTC')}</td>
+                </tr>
+                <tr>
+                    <td><strong>Location:</strong></td>
+                    <td>{city}, {country}</td>
+                </tr>
+                <tr>
+                    <td><strong>IP Address:</strong></td>
+                    <td>{ip_address}</td>
+                </tr>
+                <tr>
+                    <td><strong>Browser:</strong></td>
+                    <td>{browser}</td>
+                </tr>
+                <tr>
+                    <td><strong>Operating System:</strong></td>
+                    <td>{os}</td>
+                </tr>
+                <tr>
+                    <td><strong>Risk Level:</strong></td>
+                    <td><span class="risk-badge">{risk_level}</span> ({risk_score:.2f}/1.0)</td>
+                </tr>
+            </table>
+            
+            <h3>Why was this flagged?</h3>
+            {factors_html}
+            
+            {f'<p><a href="{maps_link}" class="button">📍 View Location on Google Maps</a></p>' if maps_link else ''}
+            
+            <div class="alert">
+                <strong>What should you do?</strong><br>
+                • If this was you, you can safely ignore this email<br>
+                • If you don't recognize this activity, immediately change your password and contact your administrator<br>
+                • Review your recent account activity for any suspicious behavior
+            </div>
+            
+            <div class="footer">
+                <p>This is an automated security alert from Zero Trust Authentication System</p>
+                <p>Do not reply to this email</p>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+    
+    try:
+        # Create message
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = subject
+        msg['From'] = from_email
+        msg['To'] = user_email
+        
+        # Attach HTML body
+        html_part = MIMEText(html_body, 'html')
+        msg.attach(html_part)
+        
+        # Send email
+        with smtplib.SMTP(smtp_host, smtp_port) as server:
+            server.starttls()
+            server.login(smtp_user, smtp_password)
+            server.send_message(msg)
+        
+        logger.info(f"✅ Suspicious login alert sent to {user_email}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to send email alert: {e}")
+        return False
+
+
+# =============================================================================
+# SESSION CREATION HELPER
+# =============================================================================
+
+async def create_login_session(
+    db,
+    user_id: int,
+    request: Request,
+    device_id: Optional[int],
+    browser_location: Optional[dict] = None,
+    risk_threshold: float = 0.5
+):
+    """
+    Create comprehensive login session with risk assessment and email alerts.
+    
+    Args:
+        db: Database session
+        user_id: User ID
+        request: FastAPI request object
+        device_id: Device ID (optional)
+        browser_location: GPS coordinates from browser (optional)
+        risk_threshold: Send email if risk_score >= threshold
+        
+    Returns:
+        Session object
+    """
+    from models import Session as SessionModel, User
+    from datetime import datetime
+    
+    # Extract client data
+    ip_address = get_client_ip(request)
+    user_agent_info = get_user_agent_info(request)
+    
+    location_data, latitude, longitude = await resolve_location_data(
+        ip_address=ip_address,
+        request=request,
+        browser_location=browser_location
+    )
+    country = location_data.get("country", "Unknown")
+    city = location_data.get("city", "Unknown")
+    
+    # Calculate risk score
+    login_hour = now_ist().hour
+    risk_score, risk_factors = calculate_comprehensive_risk_score(
+        user_id=user_id,
+        ip_address=ip_address,
+        country=country,
+        city=city,
+        browser=user_agent_info.get("browser", "Unknown"),
+        os=user_agent_info.get("os", "Unknown"),
+        device=user_agent_info.get("device", "Unknown"),
+        login_hour=login_hour,
+        db=db
+    )
+    
+    risk_status = get_comprehensive_risk_status(risk_score)
+    
+    # Create session
+    session = SessionModel(
+        user_id=user_id,
+        device_id=device_id,
+        ip_address=ip_address,
+        country=country,
+        city=city,
+        latitude=latitude,
+        longitude=longitude,
+        browser=user_agent_info.get("browser"),
+        os=user_agent_info.get("os"),
+        device=user_agent_info.get("device"),
+        user_agent=request.headers.get("User-Agent"),
+        risk_score=risk_score,
+        status=risk_status,
+        risk_factors=json.dumps(risk_factors) if risk_factors else None,
+        is_active=True
+    )
+    
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+    
+    # Send email alert if risk exceeds threshold
+    if risk_score >= risk_threshold:
+        user = db.query(User).filter(User.id == user_id).first()
+        if user:
+            user_email = user.company_email or user.personal_email
+            if user_email:
+                # Send email asynchronously (don't block login)
+                try:
+                    await send_suspicious_login_email(
+                        user_email=user_email,
+                        user_name=user.name,
+                        ip_address=ip_address,
+                        country=country,
+                        city=city,
+                        latitude=latitude,
+                        longitude=longitude,
+                        browser=user_agent_info.get("browser", "Unknown"),
+                        os=user_agent_info.get("os", "Unknown"),
+                        timestamp=session.login_at,
+                        risk_score=risk_score,
+                        risk_factors=risk_factors
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to send suspicious login email: {e}")
+    
+    # Update user's login history
+    user = db.query(User).filter(User.id == user_id).first()
+    if user:
+        user.last_login_country = country
+        user.login_ip_history = update_login_ip_history(user, ip_address)
+        user.last_login_at = now_ist()
+        db.commit()
+    
+    return session

@@ -10,7 +10,8 @@ Thread-safe using in-memory dictionary with cleanup.
 """
 
 from typing import Dict, Tuple, Optional
-from datetime import datetime, timezone, timedelta
+from datetime import timedelta
+from time_utils import now_ist
 import hashlib
 import logging
 
@@ -54,7 +55,7 @@ class RateLimiter:
             Tuple of (allowed: bool, error_message: str | None)
         """
         key = self._get_window_key("ip", ip_address)
-        now_ts = int(datetime.now(timezone.utc).timestamp())
+        now_ts = int(now_ist().timestamp())
         
         # Get current window, clean old entries
         window = self._windows.get(key, [])
@@ -84,7 +85,7 @@ class RateLimiter:
             Tuple of (allowed: bool, error_message: str | None)
         """
         key = self._get_window_key("token", token_hash)
-        now_ts = int(datetime.now(timezone.utc).timestamp())
+        now_ts = int(now_ist().timestamp())
         
         # Get current window, clean old entries
         window = self._windows.get(key, [])
@@ -105,7 +106,7 @@ class RateLimiter:
     
     def get_status(self) -> Dict:
         """Get current limiter status (for monitoring)"""
-        now_ts = int(datetime.now(timezone.utc).timestamp())
+        now_ts = int(now_ist().timestamp())
         
         # Clean all windows
         cleaned_keys = []

@@ -63,7 +63,7 @@ echo.
 echo Starting Zero Trust Agent...
 echo.
 
-REM Run the agent
-python agent.py
+REM Run the base agent
+python -m agent.main
 
 pause

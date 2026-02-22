@@ -4,6 +4,7 @@ Handles Microsoft ID token validation and user creation/login.
 """
 
 from datetime import datetime, timezone
+from time_utils import now_ist
 from pathlib import Path
 import os
 import time
@@ -206,7 +207,6 @@ async def verify_microsoft_token(token: str) -> dict:
         "email": email,
         "name": payload.get("name", email.split("@")[0]),
         "sub": subject,
-        "tenant_id": payload.get("tid"),
         "issuer": issuer,
     }
 
@@ -270,7 +270,7 @@ def get_or_create_microsoft_user(user_info: dict, db: Session):
             microsoft_id=subject,
             role="user",
             status="active",
-            created_at=datetime.now(timezone.utc)
+            created_at=now_ist()
         )
 
         db.add(new_user)

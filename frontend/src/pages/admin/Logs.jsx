@@ -15,8 +15,9 @@ export default function AdminLogs() {
   async function fetchLogs() {
     try {
       const data = await getEnhancedAdminLogs({ limit: 200 });
+
       if (data && !data.detail) {
-        setLogs(data);
+        setLogs(Array.isArray(data) ? data : []);
       } else if (data?.detail && (data.detail.includes("Admin access") || data.detail.includes("Not authorized"))) {
         navigate("/dashboard");
       }
@@ -160,6 +161,7 @@ export default function AdminLogs() {
           <p style={{ fontSize: 16, color: "#999" }}>📭 No logs found</p>
         </div>
       )}
+
     </div>
   );
 }

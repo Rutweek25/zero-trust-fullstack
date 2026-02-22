@@ -1,7 +1,8 @@
 {
   "backend_url": "http://localhost:8000",
   "agent_version": "1.0.0",
-  "heartbeat_interval": 30,
+  "heartbeat_interval": 2,
+  "pending_interval": 5,
   "request_timeout": 10,
   "device_id_storage": ".device_identity.json",
   "agent_token_storage": ".agent_token.json",

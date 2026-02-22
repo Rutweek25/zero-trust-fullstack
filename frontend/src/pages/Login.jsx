@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { PublicClientApplication } from "@azure/msal-browser";
 import { loginUser, loginWithMicrosoft, loginWithGoogle, registerUser } from "../api/api";
 import { useNavigate } from "react-router-dom";
+import { captureBrowserLocation } from "../utils/locationCapture";
 
 let msalInstanceSingleton = null;
 let msalInteractionLock = false;
@@ -70,7 +71,11 @@ const handleGoogleSignIn = async (credentialResponse, navigate, setGoogleError) 
 
   try {
     setGoogleError("");
-    const result = await loginWithGoogle(credentialResponse.credential);
+    
+    // Capture browser location for login tracking
+    const browserLocation = await captureBrowserLocation();
+    
+    const result = await loginWithGoogle(credentialResponse.credential, browserLocation);
 
     if (!result.success || !result.user?.access_token) {
       setGoogleError(result.message || "Google Sign-In failed.");
@@ -150,7 +155,10 @@ function Login() {
           sessionStorage.setItem(MSAL_LAST_REDIRECT_STATE_KEY, redirectResponse.state);
         }
 
-        const res = await loginWithMicrosoft(redirectResponse.idToken);
+        // Capture browser location for login tracking
+        const browserLocation = await captureBrowserLocation();
+        
+        const res = await loginWithMicrosoft(redirectResponse.idToken, browserLocation);
         if (!res.success || !res.user?.access_token) {
           if (isMounted) {
             setMsg(res.message || "Microsoft login failed ❌");
@@ -324,10 +332,14 @@ function Login() {
     if (!loginForm.password) return setMsg("Password is required ❌");
 
     try {
+      // Capture browser location for login tracking
+      const browserLocation = await captureBrowserLocation();
+      
       // No device UUID needed - agent handles device authentication separately
       const payload = {
         username: loginForm.email, // backend expects username but we pass email
-        password: loginForm.password
+        password: loginForm.password,
+        browser_location: browserLocation
       };
 
       const res = await loginUser(payload);

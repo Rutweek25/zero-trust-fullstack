@@ -73,10 +73,10 @@ async def register_agent(
             # Re-registration: issue new secret token
             new_secret_token = generate_agent_token()  # Random 64-byte token
             existing_device.agent_token_hash = hash_agent_token(new_secret_token)
-            existing_device.agent_token_created_at = datetime.now(timezone.utc)
-            existing_device.agent_token_rotated_at = datetime.now(timezone.utc)
+            existing_device.agent_token_created_at = now_ist()
+            existing_device.agent_token_rotated_at = now_ist()
             existing_device.agent_requires_rotation = False
-            existing_device.last_seen_at = datetime.now(timezone.utc)
+            existing_device.last_seen_at = now_ist()
             
             db.commit()
             db.refresh(existing_device)
@@ -99,7 +99,7 @@ async def register_agent(
             return AgentRegisterResponse(
                 agent_token=new_secret_token,  # 128-char hex secret
                 device_id=existing_device.id,
-                registered_at=datetime.now(timezone.utc),
+                registered_at=now_ist(),
                 is_approved=existing_device.is_approved,
                 heartbeat_interval=30,
                 message="Device re-registered" + (". Awaiting approval." if not existing_device.is_approved else "")
@@ -118,10 +118,10 @@ async def register_agent(
             is_approved=False,  # PHASE B: Approval workflow - admin must approve
             trust_score=100.0,
             agent_token_hash=hash_agent_token(new_secret_token),
-            agent_token_created_at=datetime.now(timezone.utc),
-            agent_token_rotated_at=datetime.now(timezone.utc),
-            first_registered_at=datetime.now(timezone.utc),
-            last_seen_at=datetime.now(timezone.utc)
+            agent_token_created_at=now_ist(),
+            agent_token_rotated_at=now_ist(),
+            first_registered_at=now_ist(),
+            last_seen_at=now_ist()
         )
         
         db.add(new_device)
@@ -147,7 +147,7 @@ async def register_agent(
         return AgentRegisterResponse(
             agent_token=new_secret_token,  # PHASE B: 128-char hex secret token
             device_id=new_device.id,
-            registered_at=datetime.now(timezone.utc),
+            registered_at=now_ist(),
             is_approved=False,  # MUST BE APPROVED BY ADMIN
             heartbeat_interval=30,
             message="Device registered. Awaiting admin approval."
@@ -249,7 +249,7 @@ async def receive_agent_heartbeat(
             raise HTTPException(status_code=429, detail=error_msg)
         
         # ===== SECURITY CHECK 5: Replay Protection (Nonce) =====
-        now = datetime.now(timezone.utc)
+        now = now_ist()
         nonce = heartbeat.nonce
         
         if nonce:
@@ -494,7 +494,7 @@ async def rotate_agent_token(
         
         # Generate new secret token
         new_secret_token = generate_agent_token()
-        now = datetime.now(timezone.utc)
+        now = now_ist()
         
         # Update device with new token
         device.agent_token_hash = hash_agent_token(new_secret_token)
@@ -563,7 +563,7 @@ async def approve_agent_device(
         if not device:
             raise HTTPException(status_code=404, detail="Device not found")
         
-        now = datetime.now(timezone.utc)
+        now = now_ist()
         action = request_data.action.lower()
         
         if action == "approve":

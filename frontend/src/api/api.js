@@ -61,9 +61,20 @@ export async function registerUser(data) {
 
 // ---------- LOGIN USER ----------
 export async function loginUser(data) {
+  const headers = { "Content-Type": "application/json" };
+  const browserLocation = data?.browser_location;
+  if (browserLocation?.permission_status === "granted") {
+    const lat = browserLocation.latitude;
+    const lon = browserLocation.longitude;
+    if (typeof lat === "number" && typeof lon === "number") {
+      headers["X-User-Latitude"] = String(lat);
+      headers["X-User-Longitude"] = String(lon);
+    }
+  }
+
   const res = await fetch(`${API_BASE}/login`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: JSON.stringify(data)
   });
 
@@ -85,11 +96,11 @@ export async function loginUser(data) {
   return { success: false, message: errorMessage };
 }
 
-export async function loginWithMicrosoft(token) {
+export async function loginWithMicrosoft(token, browserLocation = null) {
   const res = await fetch(`${API_BASE}/login/microsoft`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ token })
+    body: JSON.stringify({ token, browser_location: browserLocation })
   });
 
   const result = await res.json();
@@ -114,11 +125,11 @@ export async function loginWithMicrosoft(token) {
   return { success: false, message: errorMessage };
 }
 
-export async function loginWithGoogle(token) {
+export async function loginWithGoogle(token, browserLocation = null) {
   const res = await fetch(`${API_BASE}/login/google`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ token })
+    body: JSON.stringify({ token, browser_location: browserLocation })
   });
 
   const result = await res.json();
@@ -251,4 +262,34 @@ export function getEnhancedAdminLogs(filters = {}) {
 // ---------- Get User Logs (Admin) ----------
 export function getUserLogs(userId) {
   return authFetch(`${API_BASE}/admin/users/${userId}/logs`);
+}
+
+// ---------- Get USB Events (Admin/Superadmin) ----------
+export function getAdminUsbEvents(filters = {}) {
+  const queryParams = new URLSearchParams();
+
+  if (filters.skip) queryParams.append("skip", filters.skip);
+  if (filters.limit) queryParams.append("limit", filters.limit);
+
+  const queryString = queryParams.toString();
+  const url = queryString ? `${API_BASE}/admin/usb-events?${queryString}` : `${API_BASE}/admin/usb-events`;
+
+  return authFetch(url);
+}
+
+// ---------- Get Login History (Admin/Superadmin) ----------
+export function getLoginHistory(filters = {}) {
+  const queryParams = new URLSearchParams();
+
+  if (filters.user_id) queryParams.append("user_id", filters.user_id);
+  if (filters.status) queryParams.append("status", filters.status);
+  if (filters.country) queryParams.append("country", filters.country);
+  if (filters.min_risk_score) queryParams.append("min_risk_score", filters.min_risk_score);
+  if (filters.page) queryParams.append("page", filters.page);
+  if (filters.limit) queryParams.append("limit", filters.limit);
+
+  const queryString = queryParams.toString();
+  const url = queryString ? `${API_BASE}/admin/login-history?${queryString}` : `${API_BASE}/admin/login-history`;
+
+  return authFetch(url);
 }

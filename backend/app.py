@@ -1,17 +1,18 @@
-from fastapi import FastAPI, Depends, HTTPException, Query, Request, UploadFile, File, Body
+from fastapi import FastAPI, Depends, HTTPException, Query, Request, UploadFile, File, Body, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from sqlalchemy import func, text
 import uuid
+import secrets
 from fastapi.openapi.utils import get_openapi
 from jose import jwt, JWTError
 from datetime import datetime, timezone
 import logging
 from dotenv import load_dotenv, find_dotenv
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, Any
 import os
 import json
 from pathlib import Path
@@ -62,14 +63,14 @@ from schemas import (
     DeviceRegister, DeviceResponse,
     AgentRegisterRequest, AgentRegisterResponse, AgentHeartbeatRequest, AgentHeartbeatResponse,
     TelemetryResponse, TelemetryMetrics, AgentTokenRotateRequest, AgentTokenRotateResponse,
-    AgentApprovalRequest, AgentApprovalResponse
+    AgentApprovalRequest, AgentApprovalResponse, LoginHistoryResponse
 )
 from utils import (
     get_client_ip, get_user_agent_info, get_location_from_ip,
     get_location_string, calculate_login_risk_score, get_risk_status,
     update_login_ip_history, hash_agent_token, verify_agent_token,
     calculate_agent_trust_score, generate_agent_token, validate_agent_token_rotation,
-    revoke_device_sessions
+    revoke_device_sessions, create_login_session, resolve_location_data
 )
 from rate_limit import check_rate_limit_ip, check_rate_limit_token
 from auth import hash_password, verify_password, create_access_token, create_refresh_token, SECRET_KEY, ALGORITHM
@@ -77,6 +78,7 @@ from dependencies import get_current_user, admin_required
 from models import Log, User, Device, Telemetry
 from google_oauth import verify_google_token, get_or_create_google_user
 from microsoft_oauth import verify_microsoft_token, get_or_create_microsoft_user
+from time_utils import now_ist, ensure_ist
 
 
 # Custom JSON encoder to handle timezone-aware datetimes
@@ -93,12 +95,9 @@ class CustomJSONResponse(JSONResponse):
     
     @staticmethod
     def json_encoder(obj):
-        """Convert datetime objects to ISO format with UTC timezone"""
+        """Convert datetime objects to ISO format with IST timezone"""
         if isinstance(obj, datetime):
-            # If datetime is naive, assume it's UTC and make it aware
-            if obj.tzinfo is None:
-                obj = obj.replace(tzinfo=timezone.utc)
-            # Return ISO format with timezone (e.g., 2026-02-20T14:20:00+00:00)
+            obj = ensure_ist(obj)
             return obj.isoformat()
         raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
@@ -247,7 +246,7 @@ def generate_default_avatar(name: str, user_id: int) -> str:
         draw.text((x, y), initials, fill="white", font=font)
         
         # Save avatar
-        avatar_filename = f"avatar_{user_id}_{int(datetime.now(timezone.utc).timestamp())}.png"
+        avatar_filename = f"avatar_{user_id}_{int(now_ist().timestamp())}.png"
         avatar_path = AVATARS_DIR / avatar_filename
         img.save(avatar_path)
         
@@ -266,7 +265,7 @@ async def save_user_photo(file: UploadFile, user_id: int) -> str:
         if file_ext not in ["jpg", "jpeg", "png", "gif"]:
             file_ext = "jpg"
         
-        filename = f"photo_{user_id}_{int(datetime.now(timezone.utc).timestamp())}.{file_ext}"
+        filename = f"photo_{user_id}_{int(now_ist().timestamp())}.{file_ext}"
         filepath = AVATARS_DIR / filename
         
         # Read and validate image
@@ -305,6 +304,36 @@ class RegisterRequest(BaseModel):
 class MicrosoftTokenRequest(BaseModel):
     id_token: Optional[str] = None
     token: Optional[str] = None
+    browser_location: Optional[dict[str, Any]] = None
+
+
+def format_browser_location(browser_location: Optional[dict[str, Any]]) -> Optional[str]:
+    if not isinstance(browser_location, dict):
+        return None
+
+    latitude = browser_location.get("latitude")
+    longitude = browser_location.get("longitude")
+    accuracy = browser_location.get("accuracy_m")
+    permission_status = browser_location.get("permission_status")
+
+    try:
+        if latitude is not None and longitude is not None:
+            lat = float(latitude)
+            lon = float(longitude)
+            if accuracy is not None:
+                try:
+                    acc = float(accuracy)
+                    return f"Browser({lat:.6f},{lon:.6f}, ±{acc:.1f}m)"
+                except Exception:
+                    return f"Browser({lat:.6f},{lon:.6f})"
+            return f"Browser({lat:.6f},{lon:.6f})"
+    except Exception:
+        pass
+
+    if permission_status:
+        return f"BrowserLocation:{permission_status}"
+
+    return None
 
 # Alternative endpoint for backward compatibility - accepts JSON
 @app.post("/register/json", response_model=UserResponse)
@@ -469,8 +498,15 @@ async def login(credentials: UserLogin, request: Request, db: Session = Depends(
         # Extract request metadata
         ip_address = get_client_ip(request)
         user_agent_info = get_user_agent_info(request)
-        location_data = await get_location_from_ip(ip_address)
+        location_data, _, _ = await resolve_location_data(
+            ip_address=ip_address,
+            request=request,
+            browser_location=credentials.browser_location
+        )
         location_string = get_location_string(location_data)
+        browser_location_info = format_browser_location(credentials.browser_location)
+        if browser_location_info:
+            location_string = f"{location_string} | {browser_location_info}"
 
         # =====================================================================
         # FAILED LOGIN HANDLING
@@ -501,7 +537,7 @@ async def login(credentials: UserLogin, request: Request, db: Session = Depends(
                 status=risk_status,
                 # Legacy fields
                 ip=ip_address,
-                time=datetime.now(timezone.utc)
+                time=now_ist()
             )
             db.add(failed_log)
 
@@ -512,7 +548,7 @@ async def login(credentials: UserLogin, request: Request, db: Session = Depends(
                 # Lock account after 5 failed attempts
                 if user.failed_login_attempts >= 5:
                     user.account_locked = True
-                    user.locked_at = datetime.now(timezone.utc)
+                    user.locked_at = now_ist()
                     user.status = "locked"
 
                     # Log account lock
@@ -529,7 +565,7 @@ async def login(credentials: UserLogin, request: Request, db: Session = Depends(
                         risk_score=7,
                         status="suspicious",
                         ip=ip_address,
-                        time=datetime.now(timezone.utc)
+                        time=now_ist()
                     )
                     db.add(lock_log)
 
@@ -567,7 +603,7 @@ async def login(credentials: UserLogin, request: Request, db: Session = Depends(
             
             if device:
                 # Update last seen for existing agent device
-                device.last_seen_at = datetime.now(timezone.utc)
+                device.last_seen_at = now_ist()
                 device_id_for_session = device.id
                 
                 # Check if device is inactive
@@ -586,7 +622,7 @@ async def login(credentials: UserLogin, request: Request, db: Session = Depends(
                         risk_score=8,
                         status="blocked",
                         ip=ip_address,
-                        time=datetime.now(timezone.utc)
+                        time=now_ist()
                     )
                     db.add(device_blocked_log)
                     db.commit()
@@ -612,7 +648,7 @@ async def login(credentials: UserLogin, request: Request, db: Session = Depends(
                             risk_score=7,
                             status="untrusted",
                             ip=ip_address,
-                            time=datetime.now(timezone.utc)
+                            time=now_ist()
                         )
                         db.add(device_untrusted_log)
                         db.commit()
@@ -622,57 +658,18 @@ async def login(credentials: UserLogin, request: Request, db: Session = Depends(
                             detail="Device trust score is too low. Please verify your device or re-register."
                         )
         # =====================================================================
-        # SUCCESSFUL LOGIN
+        # SUCCESSFUL LOGIN - CREATE SESSION WITH RISK ASSESSMENT
         # =====================================================================
         
-        # Phase 2 risk scoring signals
-        last_country = user.last_login_country
-        current_country = location_data.get("country")
-        different_country = (
-            bool(last_country) and bool(current_country) and
-            current_country not in ("Unknown", "Local") and
-            last_country not in ("Unknown", "Local") and
-            last_country != current_country
-        )
-
-        multiple_failed_attempts = user.failed_login_attempts >= 3
-
-        existing_device = db.query(models.Session).filter(
-            models.Session.user_id == user.id,
-            models.Session.device == user_agent_info.get("device")
-        ).first()
-        new_device = existing_device is None
-
-        active_sessions_count = db.query(models.Session).filter(
-            models.Session.user_id == user.id,
-            models.Session.is_active == True
-        ).count()
-        multiple_simultaneous_sessions = active_sessions_count >= 1
-
-        risk_score = calculate_login_risk_score(
-            different_country=different_country,
-            multiple_failed_attempts=multiple_failed_attempts,
-            new_device=new_device,
-            multiple_simultaneous_sessions=multiple_simultaneous_sessions
-        )
-        risk_status = get_risk_status(risk_score)
-
-        # Create session (device_id nullable for non-agent logins)
-        session = models.Session(
-            session_id=str(uuid.uuid4()),
+        # Use new comprehensive session creation helper
+        session = await create_login_session(
+            db=db,
             user_id=user.id,
-            device_id=device_id_for_session,  # Link session to agent device (can be None)
-            ip_address=ip_address,
-            country=location_data.get("country"),
-            city=location_data.get("city"),
-            browser=user_agent_info.get("browser"),
-            os=user_agent_info.get("os"),
-            device=user_agent_info.get("device"),
-            user_agent=user_agent_info.get("full_string"),
-            login_at=datetime.now(timezone.utc),
-            is_active=True
+            request=request,
+            device_id=device_id_for_session,
+            browser_location=credentials.browser_location,
+            risk_threshold=0.5  # Send email if risk >= 0.5
         )
-        db.add(session)
 
         # Create success log
         device_info = f" with agent device: {device.device_name} (UUID: {device.device_uuid})" if device else ""
@@ -681,29 +678,25 @@ async def login(credentials: UserLogin, request: Request, db: Session = Depends(
             event_type="LOGIN_SUCCESS",
             action="Successful Login",
             details=f"User {user.username} logged in successfully{device_info}",
-            ip_address=ip_address,
-            location=location_string,
-            device=user_agent_info.get("device", "Unknown"),
-            browser=user_agent_info.get("browser"),
-            os=user_agent_info.get("os"),
-            risk_score=risk_score,
-            status=risk_status,
+            ip_address=session.ip_address,
+            location=f"{session.city}, {session.country}",
+            device=session.device,
+            browser=session.browser,
+            os=session.os,
+            risk_score=session.risk_score,
+            status=session.status,
             # Legacy fields
-            ip=ip_address,
-            time=datetime.now(timezone.utc)
+            ip=session.ip_address,
+            time=now_ist()
         )
         db.add(success_log)
 
-        # Update user fields
-        user.last_login_at = datetime.now(timezone.utc)
-        user.last_login = datetime.now(timezone.utc)  # Legacy field
-        user.failed_login_attempts = 0  # Reset counter on successful login
-        user.last_login_country = current_country
-        user.login_ip_history = update_login_ip_history(user, ip_address)
+        # Reset failed login attempts
+        user.failed_login_attempts = 0
 
         # Update device last_seen_at if agent device was used
         if device:
-            device.last_seen_at = datetime.now(timezone.utc)
+            device.last_seen_at = now_ist()
 
         # Commit all changes
         db.commit()
@@ -728,9 +721,9 @@ async def login(credentials: UserLogin, request: Request, db: Session = Depends(
             "role": user.role,
             "username": user.username,
             "session_id": session.session_id,
-            "device": user_agent_info.get("device", "Unknown"),
+            "device": session.device,
             "device_id": device_id_for_session,
-            "location": location_string
+            "location": f"{session.city}, {session.country}"
         }
 
     except HTTPException:
@@ -752,52 +745,36 @@ async def login_microsoft(req: MicrosoftTokenRequest, request: Request, db: Sess
         user_info = await verify_microsoft_token(token)
         user = get_or_create_microsoft_user(user_info, db)
 
-        ip_address = get_client_ip(request)
-        user_agent_info = get_user_agent_info(request)
-        location_data = await get_location_from_ip(ip_address)
-        location_string = get_location_string(location_data)
-
-        session = models.Session(
-            session_id=str(uuid.uuid4()),
+        # Create comprehensive session with risk assessment
+        session = await create_login_session(
+            db=db,
             user_id=user.id,
+            request=request,
             device_id=None,
-            ip_address=ip_address,
-            country=location_data.get("country"),
-            city=location_data.get("city"),
-            browser=user_agent_info.get("browser"),
-            os=user_agent_info.get("os"),
-            device=user_agent_info.get("device"),
-            user_agent=user_agent_info.get("full_string"),
-            login_at=datetime.now(timezone.utc),
-            is_active=True
+            browser_location=req.browser_location,
+            risk_threshold=0.5
         )
-        db.add(session)
 
         oauth_log = models.Log(
             user_id=user.id,
             event_type="LOGIN_SUCCESS",
             action="Successful Microsoft OAuth Login",
             details=f"User {user.username} logged in via Microsoft OAuth",
-            ip_address=ip_address,
-            location=location_string,
-            device=user_agent_info.get("device", "Unknown"),
-            browser=user_agent_info.get("browser"),
-            os=user_agent_info.get("os"),
-            risk_score=0,
-            status="normal",
-            ip=ip_address,
-            time=datetime.now(timezone.utc)
+            ip_address=session.ip_address,
+            location=f"{session.city}, {session.country}",
+            device=session.device,
+            browser=session.browser,
+            os=session.os,
+            risk_score=session.risk_score,
+            status=session.status,
+            ip=session.ip_address,
+            time=now_ist()
         )
         db.add(oauth_log)
 
-        user.last_login_at = datetime.now(timezone.utc)
-        user.last_login = datetime.now(timezone.utc)
         user.failed_login_attempts = 0
-        user.last_login_country = location_data.get("country")
-        user.login_ip_history = update_login_ip_history(user, ip_address)
 
         db.commit()
-        db.refresh(session)
 
         access_token = create_access_token({
             "sub": str(user.id),
@@ -817,8 +794,8 @@ async def login_microsoft(req: MicrosoftTokenRequest, request: Request, db: Sess
             "role": user.role,
             "username": user.username,
             "session_id": session.session_id,
-            "device": user_agent_info.get("device", "Unknown"),
-            "location": location_string
+            "device": session.device,
+            "location": f"{session.city}, {session.country}"
         }
 
     except ValueError as e:
@@ -861,7 +838,8 @@ def refresh_token(token: str = Query(...), db: Session = Depends(get_db)):
 
         # Server-side session expiration enforcement (if configured)
         if hasattr(session, "expires_at") and session.expires_at:
-            if session.expires_at < datetime.now(timezone.utc):
+            expires_at = ensure_ist(session.expires_at)
+            if expires_at and expires_at < now_ist():
                 raise HTTPException(status_code=401, detail="Session expired")
 
         if not session.is_active:
@@ -915,6 +893,7 @@ def refresh_token(token: str = Query(...), db: Session = Depends(get_db)):
 # ============================================================================
 class GoogleTokenRequest(BaseModel):
     token: str
+    browser_location: Optional[dict[str, Any]] = None
 
 
 @app.post("/login/google", response_model=EnhancedTokenResponse)
@@ -927,52 +906,36 @@ async def login_google(req: GoogleTokenRequest, request: Request, db: Session = 
         user_info = await verify_google_token(req.token)
         user = get_or_create_google_user(user_info, db)
 
-        ip_address = get_client_ip(request)
-        user_agent_info = get_user_agent_info(request)
-        location_data = await get_location_from_ip(ip_address)
-        location_string = get_location_string(location_data)
-
-        session = models.Session(
-            session_id=str(uuid.uuid4()),
+        # Create comprehensive session with risk assessment
+        session = await create_login_session(
+            db=db,
             user_id=user.id,
+            request=request,
             device_id=None,
-            ip_address=ip_address,
-            country=location_data.get("country"),
-            city=location_data.get("city"),
-            browser=user_agent_info.get("browser"),
-            os=user_agent_info.get("os"),
-            device=user_agent_info.get("device"),
-            user_agent=user_agent_info.get("full_string"),
-            login_at=datetime.now(timezone.utc),
-            is_active=True,
+            browser_location=req.browser_location,
+            risk_threshold=0.5
         )
-        db.add(session)
 
         oauth_log = models.Log(
             user_id=user.id,
             event_type="LOGIN_SUCCESS",
             action="Successful Google OAuth Login",
             details=f"User {user.username} logged in via Google OAuth",
-            ip_address=ip_address,
-            location=location_string,
-            device=user_agent_info.get("device", "Unknown"),
-            browser=user_agent_info.get("browser"),
-            os=user_agent_info.get("os"),
-            risk_score=0,
-            status="normal",
-            ip=ip_address,
-            time=datetime.now(timezone.utc),
+            ip_address=session.ip_address,
+            location=f"{session.city}, {session.country}",
+            device=session.device,
+            browser=session.browser,
+            os=session.os,
+            risk_score=session.risk_score,
+            status=session.status,
+            ip=session.ip_address,
+            time=now_ist(),
         )
         db.add(oauth_log)
 
-        user.last_login_at = datetime.now(timezone.utc)
-        user.last_login = datetime.now(timezone.utc)
         user.failed_login_attempts = 0
-        user.last_login_country = location_data.get("country")
-        user.login_ip_history = update_login_ip_history(user, ip_address)
 
         db.commit()
-        db.refresh(session)
 
         access_token = create_access_token({
             "sub": str(user.id),
@@ -992,8 +955,8 @@ async def login_google(req: GoogleTokenRequest, request: Request, db: Session = 
             "role": user.role,
             "username": user.username,
             "session_id": session.session_id,
-            "device": user_agent_info.get("device", "Unknown"),
-            "location": location_string,
+            "device": session.device,
+            "location": f"{session.city}, {session.country}",
         }
 
     except ValueError as e:
@@ -1025,6 +988,9 @@ async def logout(request: Request, db: Session = Depends(get_db), current_user=D
         user_agent_info = get_user_agent_info(request)
         location_data = await get_location_from_ip(ip_address)
         location_string = get_location_string(location_data)
+        browser_location_info = format_browser_location(req.browser_location)
+        if browser_location_info:
+            location_string = f"{location_string} | {browser_location_info}"
 
         # Find active session for this user
         active_session = db.query(models.Session).filter(
@@ -1034,11 +1000,11 @@ async def logout(request: Request, db: Session = Depends(get_db), current_user=D
 
         # Close session if found
         if active_session:
-            active_session.logout_at = datetime.now(timezone.utc)
+            active_session.logout_at = now_ist()
             active_session.is_active = False
 
         # Update user logout time
-        current_user.last_logout_at = datetime.now(timezone.utc)
+        current_user.last_logout_at = now_ist()
 
         # Create logout log
         logout_log = models.Log(
@@ -1055,7 +1021,7 @@ async def logout(request: Request, db: Session = Depends(get_db), current_user=D
             status="normal",
             # Legacy fields
             ip=ip_address,
-            time=datetime.now(timezone.utc)
+            time=now_ist()
         )
         db.add(logout_log)
         db.commit()
@@ -1063,7 +1029,7 @@ async def logout(request: Request, db: Session = Depends(get_db), current_user=D
         return {
             "message": f"User {current_user.username} logged out successfully",
             "session_closed": active_session is not None,
-            "timestamp": datetime.now(timezone.utc).isoformat()
+            "timestamp": now_ist().isoformat()
         }
     except Exception as e:
         db.rollback()
@@ -1544,13 +1510,13 @@ def lock_unlock_user(
             if request_data.action == "lock":
                 target_user.account_locked = True
                 target_user.status = "locked"
-                target_user.locked_at = datetime.now(timezone.utc)
+                target_user.locked_at = now_ist()
                 
                 # Terminate all active sessions
                 db.query(models.Session).filter(
                     models.Session.user_id == user_id,
                     models.Session.is_active == True
-                ).update({"is_active": False, "logout_at": datetime.now(timezone.utc)})
+                ).update({"is_active": False, "logout_at": now_ist()})
                 
                 # Log the action
                 log = models.Log(
@@ -1561,7 +1527,7 @@ def lock_unlock_user(
                     ip_address="system",
                     ip="system",
                     device="system",
-                    timestamp=datetime.now(timezone.utc),
+                    timestamp=now_ist(),
                     status="critical"
                 )
                 db.add(log)
@@ -1581,7 +1547,7 @@ def lock_unlock_user(
                     ip_address="system",
                     ip="system",
                     device="system",
-                    timestamp=datetime.now(timezone.utc),
+                    timestamp=now_ist(),
                     status="normal"
                 )
                 db.add(log)
@@ -1620,7 +1586,7 @@ def lock_unlock_user(
                 risk_score=risk_score,
                 user_details=user_details,
                 status="pending",
-                created_at=datetime.now(timezone.utc)
+                created_at=now_ist()
             )
             db.add(lock_request)
             db.commit()
@@ -1715,7 +1681,7 @@ def review_request(
         # Update request status
         lock_request.status = "approved" if review.action == "approve" else "rejected"
         lock_request.reviewed_by_id = current_user.id
-        lock_request.reviewed_at = datetime.now(timezone.utc)
+        lock_request.reviewed_at = now_ist()
         lock_request.review_comment = review.comment
         
         # If approved, execute the action
@@ -1728,13 +1694,13 @@ def review_request(
             if lock_request.action == "lock":
                 target_user.account_locked = True
                 target_user.status = "locked"
-                target_user.locked_at = datetime.now(timezone.utc)
+                target_user.locked_at = now_ist()
                 
                 # Terminate all active sessions
                 db.query(models.Session).filter(
                     models.Session.user_id == lock_request.user_id,
                     models.Session.is_active == True
-                ).update({"is_active": False, "logout_at": datetime.now(timezone.utc)})
+                ).update({"is_active": False, "logout_at": now_ist()})
                 
                 # Log the action
                 log = models.Log(
@@ -1745,7 +1711,7 @@ def review_request(
                     ip_address="system",
                     ip="system",
                     device="system",
-                    timestamp=datetime.now(timezone.utc),
+                    timestamp=now_ist(),
                     status="critical"
                 )
                 db.add(log)
@@ -1765,7 +1731,7 @@ def review_request(
                     ip_address="system",
                     ip="system",
                     device="system",
-                    timestamp=datetime.now(timezone.utc),
+                    timestamp=now_ist(),
                     status="normal"
                 )
                 db.add(log)
@@ -1978,7 +1944,7 @@ async def terminate_session(
             raise HTTPException(status_code=404, detail="Active session not found")
         
         # Close session
-        session.logout_at = datetime.now(timezone.utc)
+        session.logout_at = now_ist()
         session.is_active = False
         
         # Log session termination
@@ -2000,7 +1966,7 @@ async def terminate_session(
             risk_score=0.0,
             status="normal",
             ip=ip_address,
-            time=datetime.now(timezone.utc)
+            time=now_ist()
         )
         db.add(terminate_log)
         db.commit()
@@ -2101,7 +2067,7 @@ async def force_logout_session(
             if target_user and target_user.role in ("admin", "superadmin"):
                 raise HTTPException(status_code=403, detail="Not authorized to terminate admin sessions")
 
-        session.logout_at = datetime.now(timezone.utc)
+        session.logout_at = now_ist()
         session.is_active = False
 
         ip_address = get_client_ip(request)
@@ -2122,7 +2088,7 @@ async def force_logout_session(
             risk_score=0,
             status="normal",
             ip=ip_address,
-            time=datetime.now(timezone.utc)
+            time=now_ist()
         )
         db.add(log)
         db.commit()
@@ -2133,6 +2099,120 @@ async def force_logout_session(
     except Exception:
         db.rollback()
         raise HTTPException(status_code=500, detail="Unable to terminate session")
+
+
+@app.get("/admin/login-history", response_model=LoginHistoryResponse)
+def get_login_history(
+    user_id: Optional[int] = Query(None, description="Filter by user ID"),
+    status: Optional[str] = Query(None, description="Filter by status: normal, suspicious, critical"),
+    country: Optional[str] = Query(None, description="Filter by country"),
+    min_risk_score: Optional[float] = Query(None, ge=0.0, le=1.0, description="Minimum risk score"),
+    page: int = Query(1, ge=1),
+    limit: int = Query(50, ge=1, le=500),
+    db: Session = Depends(get_db),
+    current_user=Depends(admin_required)
+):
+    """
+    Admin: View comprehensive login history with geolocation and risk assessment.
+    
+    Features:
+    - Paginated session list with GPS coordinates
+    - Risk score filtering
+    - Suspicious login highlighting
+    - Summary statistics
+    - Google Maps integration ready (lat/lng included)
+    """
+    try:
+        # Build query with user join for username
+        query = db.query(
+            models.Session,
+            models.User.username
+        ).join(
+            models.User,
+            models.User.id == models.Session.user_id
+        )
+
+        # Apply role-based filtering (admins can only see users)
+        if current_user.role == "admin":
+            query = query.filter(models.User.role == "user")
+        
+        # Apply filters
+        if user_id:
+            query = query.filter(models.Session.user_id == user_id)
+        
+        if status:
+            query = query.filter(models.Session.status == status)
+        
+        if country:
+            query = query.filter(models.Session.country == country)
+        
+        if min_risk_score is not None:
+            query = query.filter(models.Session.risk_score >= min_risk_score)
+
+        # Get total count
+        total = query.with_entities(func.count(models.Session.id)).scalar() or 0
+
+        # Calculate pagination
+        offset = (page - 1) * limit
+
+        # Fetch sessions with ordering (most recent first)
+        results = query.order_by(models.Session.login_at.desc()).offset(offset).limit(limit).all()
+        
+        # Transform results to include username
+        sessions_data = []
+        for session, username in results:
+            session_dict = {
+                "id": session.id,
+                "session_id": session.session_id,
+                "user_id": session.user_id,
+                "username": username,
+                "ip_address": session.ip_address,
+                "country": session.country,
+                "city": session.city,
+                "latitude": session.latitude,
+                "longitude": session.longitude,
+                "browser": session.browser,
+                "os": session.os,
+                "device": session.device,
+                "user_agent": session.user_agent,
+                "risk_score": session.risk_score,
+                "status": session.status,
+                "risk_factors": session.risk_factors,
+                "login_at": session.login_at,
+                "logout_at": session.logout_at,
+                "is_active": session.is_active
+            }
+            sessions_data.append(session_dict)
+        
+        # Calculate summary statistics
+        all_sessions_query = db.query(models.Session)
+        if current_user.role == "admin":
+            all_sessions_query = all_sessions_query.join(
+                models.User,
+                models.User.id == models.Session.user_id
+            ).filter(models.User.role == "user")
+        
+        total_logins = all_sessions_query.count()
+        suspicious_count = all_sessions_query.filter(models.Session.status == "suspicious").count()
+        critical_count = all_sessions_query.filter(models.Session.status == "critical").count()
+        
+        summary = {
+            "total_logins": total_logins,
+            "suspicious_percentage": round((suspicious_count / total_logins * 100) if total_logins > 0 else 0, 2),
+            "critical_percentage": round((critical_count / total_logins * 100) if total_logins > 0 else 0, 2),
+            "filtered_results": total
+        }
+        
+        return {
+            "data": sessions_data,
+            "pagination": build_pagination(total, page, limit),
+            "summary": summary
+        }
+        
+    except Exception as e:
+        logger.exception("Error fetching login history")
+        raise HTTPException(status_code=500, detail=f"Unable to fetch login history: {str(e)}")
+
 
 # =============================================================================
 # DEVICE REGISTRATION ENDPOINT
@@ -2176,7 +2256,7 @@ async def register_device(
         if existing_device:
             # If device belongs to current user, update last_seen and return
             if existing_device.user_id == current_user.id:
-                existing_device.last_seen_at = datetime.now(timezone.utc)
+                existing_device.last_seen_at = now_ist()
                 db.commit()
                 db.refresh(existing_device)
                 
@@ -2194,8 +2274,8 @@ async def register_device(
             device_uuid=device_data.device_uuid,
             device_name=device_data.device_name,
             os=device_data.os,
-            first_registered_at=datetime.now(timezone.utc),
-            last_seen_at=datetime.now(timezone.utc),
+            first_registered_at=now_ist(),
+            last_seen_at=now_ist(),
             is_active=True,
             trust_score=100.0
         )
@@ -2222,8 +2302,8 @@ async def register_device(
             risk_score=0.0,
             status="normal",
             ip=ip_address,
-            time=datetime.now(timezone.utc),
-            timestamp=datetime.now(timezone.utc)
+            time=now_ist(),
+            timestamp=now_ist()
         )
         db.add(registration_log)
         
@@ -2269,15 +2349,11 @@ async def register_agent(
         existing_device = db.query(Device).filter_by(device_uuid=device_uuid).first()
         
         if existing_device:
-            # Device already exists - issue new token
-            new_token = create_access_token({
-                "sub": str(existing_device.id),
-                "type": "agent",
-                "device_uuid": device_uuid
-            })
+            # Device already exists - issue new 128-char hex token
+            new_token = secrets.token_hex(64)  # 128 characters
             
             # Update last_seen and store new token hash
-            existing_device.last_seen_at = datetime.now(timezone.utc)
+            existing_device.last_seen_at = now_ist()
             existing_device.agent_token_hash = hash_agent_token(new_token)
             db.commit()
             db.refresh(existing_device)
@@ -2287,7 +2363,8 @@ async def register_agent(
             return AgentRegisterResponse(
                 agent_token=new_token,
                 device_id=existing_device.id,
-                registered_at=datetime.now(timezone.utc),
+                registered_at=now_ist(),
+                is_approved=bool(existing_device.is_approved),
                 heartbeat_interval=30
             )
         
@@ -2301,16 +2378,12 @@ async def register_agent(
             os=request_data.os_version.split()[0] if request_data.os_version else None,
             is_active=True,
             trust_score=100.0,
-            first_registered_at=datetime.now(timezone.utc),
-            last_seen_at=datetime.now(timezone.utc)
+            first_registered_at=now_ist(),
+            last_seen_at=now_ist()
         )
         
-        # Generate and store agent token
-        agent_token = create_access_token({
-            "sub": str(new_device.id),
-            "type": "agent",
-            "device_uuid": device_uuid
-        })
+        # Generate and store 128-char hex agent token
+        agent_token = secrets.token_hex(64)  # 128 characters
         
         new_device.agent_token_hash = hash_agent_token(agent_token)
         
@@ -2330,7 +2403,7 @@ async def register_agent(
             device=request_data.hostname,
             risk_score=0.0,
             status="normal",
-            timestamp=datetime.now(timezone.utc)
+            timestamp=now_ist()
         )
         db.add(registration_log)
         db.commit()
@@ -2338,7 +2411,8 @@ async def register_agent(
         return AgentRegisterResponse(
             agent_token=agent_token,
             device_id=new_device.id,
-            registered_at=datetime.now(timezone.utc),
+            registered_at=now_ist(),
+            is_approved=bool(new_device.is_approved),
             heartbeat_interval=30
         )
         
@@ -2357,7 +2431,7 @@ async def register_agent(
 async def receive_agent_heartbeat(
     heartbeat: AgentHeartbeatRequest,
     request: Request,
-    authorization: Optional[str] = None,
+    authorization: Optional[str] = Header(default=None),
     db: Session = Depends(get_db)
 ):
     """
@@ -2378,16 +2452,9 @@ async def receive_agent_heartbeat(
         
         token = authorization.replace("Bearer ", "").strip()
         
-        # Verify token
-        try:
-            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-            token_type = payload.get("type")
-            
-            if token_type != "agent":
-                raise HTTPException(status_code=401, detail="Invalid token type")
-                
-        except JWTError:
-            raise HTTPException(status_code=401, detail="Invalid or expired token")
+        # Validate token format (128-char hex for agent tokens)
+        if len(token) != 128:
+            raise HTTPException(status_code=401, detail="Invalid token format")
         
         device_uuid = heartbeat.device_uuid.strip()
         
@@ -2398,19 +2465,18 @@ async def receive_agent_heartbeat(
             raise HTTPException(status_code=404, detail=f"Device {device_uuid} not found")
         
         # Verify token hash matches
-        if device.agent_token_hash:
-            if not verify_agent_token(token, device.agent_token_hash):
-                raise HTTPException(status_code=401, detail="Token mismatch")
+        if not device.agent_token_hash or not verify_agent_token(token, device.agent_token_hash):
+            raise HTTPException(status_code=401, detail="Invalid or expired token")
         
         # Update device last_seen
-        device.last_seen_at = datetime.now(timezone.utc)
+        device.last_seen_at = now_ist()
         
         # Store telemetry snapshot
         metrics_json = json.dumps(heartbeat.metrics.dict(exclude_none=True), default=str)
         
         telemetry = Telemetry(
             device_id=device.id,
-            collected_at=heartbeat.timestamp or datetime.now(timezone.utc),
+            collected_at=ensure_ist(heartbeat.timestamp) if heartbeat.timestamp else now_ist(),
             metrics=metrics_json,
             sample_count=1
         )
@@ -2453,7 +2519,9 @@ async def receive_agent_heartbeat(
             message="Heartbeat received",
             device_id=device.id,
             new_trust_score=new_trust_score,
-            received_at=datetime.now(timezone.utc)
+            is_approved=bool(device.is_approved),
+            requires_rotation=bool(device.agent_requires_rotation),
+            received_at=now_ist()
         )
         
     except HTTPException:
@@ -2510,6 +2578,60 @@ async def get_agent_devices(
         raise HTTPException(status_code=500, detail="Failed to fetch devices")
 
 
+@app.post("/agent/devices/{device_id}/approve", response_model=AgentApprovalResponse, tags=["agent"])
+async def approve_agent_device(
+    device_id: int,
+    request_data: AgentApprovalRequest,
+    request: Request,
+    current_user: User = Depends(admin_required),
+    db: Session = Depends(get_db)
+):
+    """Approve or reject agent device (admin only)."""
+    try:
+        action = (request_data.action or "").strip().lower()
+        if action not in {"approve", "reject"}:
+            raise HTTPException(status_code=400, detail="Action must be 'approve' or 'reject'")
+
+        device = db.query(Device).filter_by(id=device_id).first()
+        if not device:
+            raise HTTPException(status_code=404, detail="Device not found")
+
+        device.is_approved = action == "approve"
+        if action == "approve":
+            device.is_active = True
+
+        now = now_ist()
+
+        audit_log = Log(
+            user_id=current_user.id,
+            event_type="AGENT_APPROVED" if action == "approve" else "AGENT_REJECTED",
+            action=f"Agent device {action}d",
+            details=f"Device {device.device_uuid} {action}d by {current_user.username}. Reason: {request_data.reason or 'None'}",
+            ip_address=get_client_ip(request),
+            device=device.hostname or device.device_uuid,
+            risk_score=0.0,
+            status="normal",
+            timestamp=now
+        )
+        db.add(audit_log)
+        db.commit()
+
+        return AgentApprovalResponse(
+            device_id=device.id,
+            is_approved=device.is_approved,
+            device_uuid=device.device_uuid,
+            hostname=device.hostname or "unknown",
+            approved_at=now if action == "approve" else None,
+            message="Device approved" if action == "approve" else "Device rejected"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Device approval error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Approval action failed")
+
+
 @app.get("/agent/devices/{device_id}/telemetry", tags=["agent"])
 async def get_device_telemetry(
     device_id: int,
@@ -2562,6 +2684,106 @@ async def get_device_telemetry(
     except Exception as e:
         logger.error(f"Error fetching telemetry: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to fetch telemetry")
+
+
+@app.get("/admin/usb-events", tags=["agent"])
+async def get_admin_usb_events(
+    current_user: User = Depends(admin_required),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+    db: Session = Depends(get_db)
+):
+    """
+    Get recent USB insert/remove events for admin and superadmin.
+
+    Source: telemetry.metrics.usb_devices from agent heartbeats.
+    """
+    try:
+        def _to_datetime(value):
+            if isinstance(value, datetime):
+                return value
+            if isinstance(value, str) and value.strip():
+                text = value.strip()
+                try:
+                    return datetime.fromisoformat(text.replace("Z", "+00:00"))
+                except Exception:
+                    return None
+            return None
+
+        snapshots = db.query(Telemetry, Device)\
+            .join(Device, Device.id == Telemetry.device_id)\
+            .order_by(Telemetry.collected_at.desc())\
+            .limit(2000)\
+            .all()
+
+        events = []
+        for telemetry, device in snapshots:
+            if not telemetry.metrics:
+                continue
+
+            try:
+                metrics = json.loads(telemetry.metrics)
+            except Exception:
+                continue
+
+            usb_devices = metrics.get("usb_devices")
+            if not isinstance(usb_devices, list) or not usb_devices:
+                continue
+
+            for usb_event in usb_devices:
+                if not isinstance(usb_event, dict):
+                    continue
+
+                description = str(usb_event.get("description", "")).strip()
+                event_type = None
+                if "EventType" in description:
+                    try:
+                        event_type = int(description.split(":", 1)[1].strip())
+                    except Exception:
+                        event_type = None
+
+                if event_type == 2:
+                    event_label = "USB inserted"
+                elif event_type == 3:
+                    event_label = "USB removed"
+                else:
+                    event_label = "USB changed"
+
+                raw_event_ts = usb_event.get("timestamp")
+                event_dt = _to_datetime(raw_event_ts)
+                collected_dt = _to_datetime(telemetry.collected_at)
+                final_dt = event_dt or collected_dt
+
+                events.append({
+                    "telemetry_id": telemetry.id,
+                    "device_id": device.id,
+                    "device_uuid": device.device_uuid,
+                    "hostname": device.hostname,
+                    "event": event_label,
+                    "description": description or None,
+                    "event_timestamp": final_dt.isoformat() if isinstance(final_dt, datetime) else (raw_event_ts or str(telemetry.collected_at)),
+                    "collected_at": collected_dt.isoformat() if isinstance(collected_dt, datetime) else str(telemetry.collected_at),
+                    "sort_ts": final_dt.isoformat() if isinstance(final_dt, datetime) else ""
+                })
+
+        events.sort(key=lambda item: item.get("sort_ts", ""), reverse=True)
+
+        for item in events:
+            item.pop("sort_ts", None)
+
+        sliced = events[skip: skip + limit]
+        return {
+            "data": sliced,
+            "pagination": {
+                "total": len(events),
+                "skip": skip,
+                "limit": limit,
+                "total_pages": (len(events) + limit - 1) // limit if events else 0
+            }
+        }
+    except Exception as e:
+        logger.error(f"Error fetching USB events: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to fetch USB events")
 
 
 # ============================================================================

@@ -49,5 +49,5 @@ echo ""
 echo "Starting Zero Trust Agent..."
 echo ""
 
-# Run the agent
-python agent.py
+# Run the base agent
+python -m agent.main

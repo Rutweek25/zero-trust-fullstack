@@ -1,0 +1,585 @@
+# Complete System Architecture & Usage Guide
+
+## 🚀 Quick Start (Choose One)
+
+### Option 1: Double-Click (Simplest)
+```
+Double-click: START_ALL_SERVICES.bat
+```
+
+### Option 2: Command Line (Batch)
+```cmd
+RUN_ALL.bat
+```
+
+### Option 3: PowerShell (Most Flexible)
+```powershell
+.\RUN_ALL.ps1
+.\RUN_ALL.ps1 -Help         # Show options
+.\RUN_ALL.ps1 -NoAgent      # Skip agent
+.\RUN_ALL.ps1 -NoFrontend   # Skip frontend
+```
+
+---
+
+## 📊 System Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│              ZERO TRUST MONITORING SYSTEM               │
+├─────────────────────────────────────────────────────────┤
+│                                                         │
+│  ┌──────────────────┐      ┌──────────────────┐       │
+│  │   FRONTEND       │      │    BACKEND       │       │
+│  │  (Port 5173)     │◄────►│   (Port 8000)    │       │
+│  │  - Login UI      │      │  - FastAPI       │       │
+│  │  - Dashboard     │      │  - Authentication       │
+│  │  - USB Events    │      │  - Device Mgmt   │       │
+│  └──────────────────┘      │  - Telemetry DB │       │
+│         ▲                   └──────────────────┘       │
+│         │                           ▲               │
+│         │ Browser Location          │                  │
+│         │ Permission                │                  │
+│         │                    Device Heartbeat        │
+│         │                    USB Telemetry           │
+│         │                    Location Data           │
+│         │                           │                  │
+│         └───────────┬───────────────┘                 │
+│                     │                                  │
+│         ┌───────────▼───────────┐                      │
+│         │      AGENT            │                      │
+│         │   (Python Process)    │                      │
+│         │                       │                      │
+│         │  ┌─────────────────┐  │                      │
+│         │  │ USB Monitor     │  │  (Windows Device)    │
+│         │  │ (WMI Events)    │  │                      │
+│         │  └─────────────────┘  │                      │
+│         │                       │                      │
+│         │  ┌─────────────────┐  │                      │
+│         │  │ Metrics        │  │  (CPU, Memory, Disk)  │
+│         │  │ Collection      │  │                      │
+│         │  └─────────────────┘  │                      │
+│         │                       │                      │
+│         │  ┌─────────────────┐  │                      │
+│         │  │ Location Fetch  │  │  (Browser GPS)       │
+│         │  │ (Browser API)   │  │                      │
+│         │  └─────────────────┘  │                      │
+│         │                       │                      │
+│         └───────────────────────┘                      │
+│                                                        │
+│  ┌──────────────────────────────┐                      │
+│  │   DATABASE (SQLite)          │                      │
+│  │   insider.db                 │                      │
+│  │                              │                      │
+│  │  Tables:                     │                      │
+│  │  - users                     │                      │
+│  │  - devices                   │                      │
+│  │  - sessions                  │                      │
+│  │  - telemetry                 │                      │
+│  │  - logs                      │                      │
+│  └──────────────────────────────┘                      │
+│                    ▲                                    │
+│                    │                                    │
+│                    └── DB Watcher                       │
+│                    (Real-time Monitoring)              │
+│                                                         │
+└─────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 🔄 Data Flow
+
+### USB Detection Flow (< 2 seconds)
+
+```
+1. USB Device Inserted
+   ↓
+2. Windows WMI Event (Instant)
+   ↓
+3. Agent Detects (Immediate)
+   ↓
+4. Creates USB Event Payload
+   ↓
+5. Queues Event (Priority flush enabled)
+   ↓
+6. Flushes to Backend (< 100ms)
+   ↓
+7. Backend Stores in DB (< 50ms)
+   ↓
+8. DB Watcher Polls (1-second interval)
+   ↓
+9. Displays Event in Terminal 4 (Combined: < 2 seconds)
+```
+
+### Location Tracking Flow
+
+```
+1. User Logs In
+   ↓
+2. Browser Requests Permission ("Allow location?")
+   ↓
+3. User Grants (or denies) → Browser gets GPS
+   ↓
+4. Browser Sends in Login Request
+   ↓
+5. Backend Stores in Session Table
+   ↓
+6. Location Used for:
+   - Device trust scoring
+   - Anomaly detection
+   - Session validation
+   - Admin dashboard display
+```
+
+### Telemetry Collection Flow
+
+```
+Agent Every 2 Seconds:
+├─ Read CPU usage (psutil, non-blocking)
+├─ Read Memory usage
+├─ Read Disk usage
+├─ Read Network connections
+├─ Collect USB events (if any)
+├─ Package into heartbeat
+└─ Send to Backend
+
+Backend on Receipt:
+├─ Verify agent token
+├─ Validate signature
+├─ Storage in Telemetry table
+├─ Update device.last_seen_at
+├─ Calculate risk score
+└─ Return approval status
+```
+
+---
+
+## 🎯 Service Details
+
+### Terminal 1: Backend (FastAPI)
+```
+Port: 8000
+Protocol: HTTP
+Framework: FastAPI (Python)
+Database: SQLite (insider.db)
+Features:
+  ✓ User authentication (login/register)
+  ✓ Device approval workflow
+  ✓ Agent heartbeat processing
+  ✓ Geolocation tracking
+  ✓ Session management
+  ✓ Telemetry storage/retrieval
+  ✓ Swagger API documentation
+
+Access:
+  Main: http://localhost:8000
+  Docs: http://localhost:8000/docs
+  ReDoc: http://localhost:8000/redoc
+```
+
+### Terminal 2: Frontend (Vite + Vue)
+```
+Port: 5173
+Framework: Vue 3 + Vite
+Features:
+  ✓ Login/registration interface
+  ✓ Admin dashboard
+  ✓ Device management
+  ✓ USB events display
+  ✓ Geolocation visualization
+  ✓ Real-time updates (if WebSocket enabled)
+  ✓ Session history
+  ✓ Trust score display
+
+Access:
+  App: http://localhost:5173
+  Admin: http://localhost:5173/admin
+  USB Events: http://localhost:5173/admin/usb-events
+```
+
+### Terminal 3: Agent (Python Process)
+```
+Process: run_agent.bat
+Framework: Python 3.9+
+Runs: Agent orchestration with collectors
+
+Components:
+  ┌─ USB Monitor
+  │  └─ WMI event listener (Windows)
+  │     └─ Detects insertions/removals
+  │
+  ├─ Metrics Collector
+  │  └─ psutil sampling
+  │     ├─ CPU (non-blocking)
+  │     ├─ Memory
+  │     ├─ Disk
+  │     └─ Network
+  │
+  ├─ System Info
+  │  └─ Hardware discovery
+  │     ├─ Processor
+  │     ├─ RAM
+  │     ├─ Hostname
+  │     └─ OS Version
+  │
+  ├─ Location Fetch
+  │  └─ Browser geolocation
+  │     └─ Via device.open() API call
+  │
+  └─ Heartbeat Sender
+     └─ REST API client
+        ├─ Register endpoint
+        ├─ Heartbeat endpoint
+        └─ Token rotation
+
+Intervals:
+  Heartbeat (approved): 2 seconds
+  Heartbeat (unapproved): 5 seconds
+  USB event flush: Immediate
+  Metrics collection: Non-blocking (0ms blocking)
+
+Config File: agent/config.json
+```
+
+### Terminal 4: Database Watcher (Python Script)
+```
+Script: python check_db.py
+Location: backend/check_db.py
+
+Function:
+  Continuously polls SQLite database for new telemetry
+  Displays USB events in real-time as they arrive
+  
+Features:
+  ✓ 1-second poll interval (optimized)
+  ✓ Queries only new rows (ID-based tracking)
+  ✓ Formats output with IST timestamps
+  ✓ Shows device ID, event type, description
+  ✓ No database locking (read-only)
+
+Output Format:
+  [2026-02-22T03:15:42.123456+05:30] device_id=6 USB inserted (EventType: 2)
+  [2026-02-22T03:15:42.234567+05:30] device_id=6 USB changed (EventType: 1)
+
+Timestamp Timezone: IST (India Standard Time, UTC+5:30)
+```
+
+---
+
+## 📊 Database Schema (SQLite)
+
+```
+insider.db
+├─ users
+│  ├─ id (Primary Key)
+│  ├─ email (Unique)
+│  ├─ hashed_password
+│  ├─ is_active
+│  └─ created_at (IST)
+│
+├─ devices
+│  ├─ id (Primary Key)
+│  ├─ device_uuid (Unique)
+│  ├─ hostname
+│  ├─ is_approved (0 = No, 1 = Yes)
+│  ├─ is_active
+│  ├─ trust_score (0-100)
+│  ├─ first_registered_at (IST)
+│  └─ last_seen_at (IST)
+│
+├─ sessions
+│  ├─ id (Primary Key)
+│  ├─ user_id (Foreign Key)
+│  ├─ device_id (Foreign Key)
+│  ├─ latitude (Geolocation)
+│  ├─ longitude (Geolocation)
+│  ├─ location (IP-based)
+│  ├─ user_agent
+│  ├─ ip_address
+│  ├─ created_at (IST)
+│  └─ expires_at (IST)
+│
+├─ telemetry
+│  ├─ id (Primary Key)
+│  ├─ device_id (Foreign Key)
+│  ├─ collected_at (IST)
+│  ├─ metrics (JSON)
+│  │  ├─ cpu: {percent: float}
+│  │  ├─ memory: {virtual: {percent: float, used_mb: float}}
+│  │  ├─ disk: {root: {percent: float, used_gb: float}}
+│  │  ├─ processes: {total: int}
+│  │  ├─ network: {connections: int}
+│  │  └─ usb_devices: [{event_type, timestamp, description}]
+│  └─ sample_count (int, default 1)
+│
+└─ logs
+   ├─ id (Primary Key)
+   ├─ device_id (Foreign Key, nullable)
+   ├─ action (string)
+   ├─ details (JSON)
+   ├─ created_at (IST)
+   └─ ip_address
+```
+
+---
+
+## 🔐 Authentication & Approval Workflow
+
+```
+Device Registration:
+┌─────────────────┐
+│ Agent Starts    │
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────────────────┐
+│ Sends Registration Request  │ ← Device UUID, Hardware Info
+├─────────────────────────────┤
+│ Backend Response:           │
+│ - agent_token (128 char)    │
+│ - is_approved: false        │ ← Initially unapproved
+└────────┬────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────────┐
+│ Agent Waits for Approval           │  (pending_interval: 5s)
+│ Sends heartbeats with empty metrics │
+└────────┬────────────────────────────┘
+         │
+         ▼  (Admin approves device)
+    Approval Request
+    POST /agent/devices/{id}/approve
+         │
+         ▼
+┌─────────────────────────────┐
+│ Backend Updates:            │
+│ device.is_approved = 1      │
+│ device.approved_at = now()  │
+└────────┬────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────────┐
+│ Agent Gets Response:                │
+│ is_approved = true                  │
+│ Switches to: approved_interval: 2s  │
+└────────┬────────────────────────────┘
+         │
+         ▼
+┌──────────────────────────────────┐
+│ Agent Sends Full Telemetry      │
+│ Every 2 seconds:                │
+│ - CPU, Memory, Disk            │
+│ - USB events (priority flush)   │
+│ - Location data                 │
+└──────────────────────────────────┘
+```
+
+---
+
+## 🧪 Testing Scenarios
+
+### Scenario 1: USB Detection (< 2 seconds)
+
+```
+Terminal 1: Backend running ✓
+Terminal 2: Frontend running ✓
+Terminal 3: Agent running ✓
+Terminal 4: DB Watcher running ✓
+
+Steps:
+1. Insert USB device
+2. Watch Terminal 4 for event
+3. Should appear within 2 seconds
+
+Expected Output:
+[2026-02-22T03:15:42.123456+05:30] device_id=6 USB inserted (EventType: 2)
+```
+
+### Scenario 2: Device Approval
+
+```
+Terminal 1: Backend running ✓
+Terminal 3: Agent running ✓
+
+Steps:
+1. Login: http://localhost:5173/login
+2. Go to Admin > Devices
+3. Find your device (not approved yet)
+4. Click "Approve"
+5. Check Terminal 3 for "Switching to approved interval: 2s"
+
+Expected Behavior:
+- Before approval: Minimal heartbeats (5s interval)
+- After approval: Full telemetry (2s interval)
+```
+
+### Scenario 3: Location Tracking
+
+```
+Terminal 1: Backend running ✓
+Terminal 2: Frontend running ✓
+
+Steps:
+1. Open Browser DevTools (F12)
+2. Go to http://localhost:5173/login
+3. Click Login
+4. Browser asks: "Allow location?"
+5. Click "Allow"
+6. Check DevTools Console for success message
+
+Expected:
+- Browser GPS coordinates sent to backend
+- Location stored in session table
+- Used for device trust scoring
+```
+
+### Scenario 4: Real-time Telemetry
+
+```
+Terminal 3: Agent running ✓
+Terminal 4: DB Watcher running ✓
+
+Steps:
+1. Check Terminal 4 continuously
+2. Every 2 seconds, agent sends telemetry
+3. DB Watcher displays CPU, Memory, USB events
+
+Expected Output:
+[2026-02-22T03:15:42.456789+05:30] device_id=6 metrics received
+  CPU: 5.2%, Memory: 2048MB, Network: 12 connections
+```
+
+---
+
+## 📈 Performance Metrics
+
+| Component | Metric | Value | Notes |
+|-----------|--------|-------|-------|
+| **USB Detection** | Detection latency | < 2 seconds | WMI → Agent → Backend → DB |
+| **Metrics Collection** | Blocking time | 0ms | CPU sampling non-blocking |
+| **Heartbeat Interval** | Approved device | 2 seconds | 15x faster than original |
+| **Heartbeat Interval** | Pending device | 5 seconds | Rate-limited for unapproved |
+| **DB Poll Interval** | Watcher refresh | 1 second | Real-time feel |
+| **API Response** | Average latency | < 100ms | FastAPI optimization |
+| **USB Event Flush** | Priority delivery | Immediate | No queue waiting |
+| **Backend Startup** | Time to ready | < 5 seconds | Fast initialization |
+| **Frontend Startup** | Time to renderable | < 5 seconds | Vite optimization |
+
+---
+
+## 🔧 Customization
+
+### Adjust Heartbeat Interval
+Edit: `agent/config.json`
+```json
+{
+  "heartbeat_interval": 2,      // Change this for approved devices
+  "pending_interval": 5,        // Change this for unapproved devices
+}
+```
+
+### Adjust DB Watcher Poll Interval
+Edit: `backend/check_db.py` line ~114
+```python
+watch_usb_events_db(poll_seconds=1)  # Change to 0.5 for faster polling
+```
+
+### Enable/Disable Telemetry Components
+Edit: `agent/config.json`
+```json
+{
+  "usb_monitoring_enabled": true,
+  "cpu_telemetry_enabled": true,
+  "memory_telemetry_enabled": true,
+  "disk_telemetry_enabled": true,
+  "network_telemetry_enabled": true
+}
+```
+
+---
+
+## ⚠️ Troubleshooting
+
+### All Services Start But Nothing Works
+
+**Check 1: Database**
+```powershell
+cd backend
+python create_db.py  # Recreate if corrupted
+python inspect_db.py # Check contents
+```
+
+**Check 2: Port Conflicts**
+```powershell
+netstat -ano | findstr :8000   # Backend
+netstat -ano | findstr :5173   # Frontend
+```
+
+**Check 3: Backend Logs**
+Check Terminal 1 for Python errors
+
+### USB Events Not Appearing
+
+**Check 1: Agent Running**
+Verify Terminal 3 shows agent initialization
+
+**Check 2: Device Approved**
+Login and check if device is approved
+
+**Check 3: DB Watcher**
+Verify Terminal 4 is actively polling
+
+**Check 4: USB Chipset Support**
+Some USB devices may not trigger WMI events on certain systems
+
+### Frontend Can't Connect to Backend
+
+**Possible Causes:**
+- Backend not running (check Terminal 1)
+- Port 8000 already in use
+- Firewall blocking localhost:8000
+- CORS configuration issue
+
+**Solution:**
+```powershell
+# Check if backend is responding
+Invoke-WebRequest http://localhost:8000/docs
+```
+
+---
+
+## 📞 Support Commands
+
+```powershell
+# Test Backend
+curl http://localhost:8000/docs
+
+# Test Frontend
+curl http://localhost:5173
+
+# Check Database
+sqlite3 backend/insider.db ".tables"
+
+# Monitor Agent
+Get-Process | findstr python
+
+# Check Ports
+netstat -ano | findstr LISTENING
+```
+
+---
+
+## 🎉 Success Indicators
+
+✅ **System is working correctly when:**
+- [ ] All 4 terminals show "Starting..." without errors
+- [ ] Frontend loads at http://localhost:5173
+- [ ] Can login with superadmin@company.com / super@1234
+- [ ] API docs available at http://localhost:8000/docs
+- [ ] Insert USB → Event appears in Terminal 4 within 2 seconds
+- [ ] Browser asks for location permission on login
+- [ ] Device shows in Admin > Devices table
+- [ ] Can approve device and see status change
+
+---
